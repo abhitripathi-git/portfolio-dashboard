@@ -1,0 +1,27 @@
+[project]
+name = "portfolio-dashboard"
+version = "0.1.0"
+description = "Personal multi-user Indian stock & mutual fund portfolio dashboard with local SQLite storage and FastMCP server"
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.40.0",
+    "plotly>=5.24.0",
+    "pandas>=2.2.0",
+    "openpyxl>=3.1.5",
+    "pdfplumber>=0.11.4",
+    "casparser>=0.7.0",
+    "yfinance>=0.2.50",
+    "mftool>=2.8",
+    "fastmcp>=2.0.0",
+    "google-genai>=1.0.0",
+    "requests>=2.32.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
