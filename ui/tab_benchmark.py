@@ -361,7 +361,7 @@ def render_benchmark_tab(selection: SidebarSelection) -> None:
         st.plotly_chart(fig, width="stretch")
 
         # Quick comparison table
-        with st.expander("Detailed Simulation Metrics & Included Scrips", expanded=not seg_df.empty):
+        with st.expander("Detailed Simulation Metrics", expanded=not seg_df.empty):
             comp_rows = [
                 {
                     "Metric": "Time-Weighted Return (TWR)",
@@ -399,7 +399,6 @@ def render_benchmark_tab(selection: SidebarSelection) -> None:
                 },
             ]
             st.dataframe(pd.DataFrame(comp_rows), width="stretch", hide_index=True)
-            st.caption(f"Overall included symbols ({len(res.get('included_symbols', []))}): {', '.join(res.get('included_symbols', []))}")
             if seg_res is not None and seg_res.get("included_symbols"):
                 st.caption(f"{seg_label} symbols ({len(seg_res.get('included_symbols', []))}): {', '.join(seg_res.get('included_symbols', []))}")
             if res.get("excluded_symbols"):

@@ -339,14 +339,6 @@ html, body, [class*="css"] {
     line-height: 1.45 !important;
     padding-top: 0.55rem !important;
 }
-.db-status-card {
-    background: rgba(148, 163, 184, 0.08);
-    border: 1px solid rgba(148, 163, 184, 0.22);
-    border-radius: 12px;
-    padding: 0.8rem 0.95rem;
-    font-size: 0.84rem;
-    line-height: 1.6;
-}
 .status-badge {
     display: inline-block;
     padding: 0.16rem 0.55rem;

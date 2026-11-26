@@ -1,4 +1,4 @@
-"""Sidebar controls: owner/account filter, live price refresh, server restart, and DB status."""
+"""Sidebar controls: owner/account filter, live price refresh, sync, and server restart."""
 
 from __future__ import annotations
 
@@ -24,14 +24,6 @@ class SidebarSelection:
     db_path: Path
     is_demo_mode: bool
     db_status: dict[str, Any]
-
-
-def _format_size(num_bytes: int) -> str:
-    if num_bytes < 1024:
-        return f"{num_bytes} B"
-    if num_bytes < 1024 * 1024:
-        return f"{num_bytes / 1024:.1f} KB"
-    return f"{num_bytes / (1024 * 1024):.2f} MB"
 
 
 def render_sidebar() -> SidebarSelection:
@@ -124,30 +116,6 @@ def render_sidebar() -> SidebarSelection:
             st.caption(st.session_state["sidebar_backup_msg"])
 
         db_status = load_db_status(active_db)
-
-        st.divider()
-        st.subheader(":material/storage: Database Status")
-        status_html = (
-            '<div class="db-status-card">'
-            f'<div><strong><code>{active_db.name}</code></strong> &nbsp;'
-            '<span class="status-badge badge-high">LIVE DB</span></div>'
-            f'<div>Size: <strong>{_format_size(db_status["size_bytes"])}</strong> · '
-            f'Accounts: <strong>{db_status["accounts_count"]}</strong></div>'
-            f'<div>Equities: <strong>{db_status["eq_count"]}</strong> · '
-            f'MFs: <strong>{db_status["mf_count"]}</strong> · '
-            f'Txns: <strong>{db_status["tx_count"]}</strong></div>'
-            '</div>'
-        )
-        st.markdown(status_html, unsafe_allow_html=True)
-
-        last_log = db_status.get("last_log")
-        if last_log:
-            st.caption(
-                f"Last import: {last_log.get('source_type', '')} "
-                f"({last_log.get('rows_inserted', 0)} rows) · {last_log.get('imported_at', '')}"
-            )
-        else:
-            st.caption("No imports recorded yet.")
 
     return SidebarSelection(
         owner=owner_val,
