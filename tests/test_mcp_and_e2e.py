@@ -436,9 +436,33 @@ def test_gemini_chat_tool_loop_and_direct_tools(seeded_mcp_db: Path, mock_market
             api_key="fake-key",
             active_owner="Abhishek",
             db_path=seeded_mcp_db,
+            enable_tools=True,
         )
 
     assert "Abhishek holds 7 direct stocks" in out["reply"]
     assert len(out["tools_used"]) == 1
     assert out["tools_used"][0]["tool"] == "tool_get_portfolio_summary"
+
+    # Also verify fast single-shot raw streaming path
+    from core.gemini_chat import stream_portfolio_gemini
+
+    class FakeStreamModels:
+        def generate_content_stream(self, model, contents, config):
+            yield SimpleNamespace(text="RC Capital: ")
+            yield SimpleNamespace(text="₹12.5 L vs Fintrekk: ₹15.0 L")
+
+    class FakeStreamClient:
+        def __init__(self, api_key: str):
+            self.models = FakeStreamModels()
+
+    with patch("google.genai.Client", FakeStreamClient):
+        streamed = "".join(
+            stream_portfolio_gemini(
+                prompt="Compare RC Capital vs Fintrekk",
+                api_key="fake-key",
+                active_owner="Abhishek",
+                db_path=seeded_mcp_db,
+            )
+        )
+    assert "RC Capital: ₹12.5 L" in streamed
 

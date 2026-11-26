@@ -173,6 +173,16 @@ def init_db(db_path: Path | str | None = None, seed_default_owners: bool = True)
                 updated_at TEXT NOT NULL,
                 UNIQUE(owner, name)
             );
+
+            CREATE TABLE IF NOT EXISTS cap_allocations (
+                asset_key TEXT PRIMARY KEY,
+                asset_class TEXT NOT NULL DEFAULT 'EQUITY',
+                large_pct REAL NOT NULL DEFAULT 0.0,
+                mid_pct REAL NOT NULL DEFAULT 0.0,
+                small_pct REAL NOT NULL DEFAULT 0.0,
+                other_pct REAL NOT NULL DEFAULT 0.0,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         for tbl in ("transactions", "holdings", "mf_holdings", "holding_baselines"):
@@ -1040,6 +1050,50 @@ def save_other_assets(
             saved += 1
         conn.commit()
     return {"saved": saved}
+
+
+def query_cap_allocations(db_path: Path | str | None = None) -> dict[str, dict[str, Any]]:
+    """Return cached Large/Mid/Small/Other % allocations keyed by uppercase asset_key."""
+    with get_connection(db_path) as conn:
+        rows = conn.execute("SELECT * FROM cap_allocations").fetchall()
+        return {str(r["asset_key"]).strip().upper(): dict(r) for r in rows}
+
+
+def upsert_cap_allocations(rows: list[dict[str, Any]], db_path: Path | str | None = None) -> int:
+    """Persist point-in-time market-cap percentage allocations into SQLite."""
+    now = _utc_now()
+    saved = 0
+    with get_connection(db_path) as conn:
+        for r in rows:
+            key = str(r.get("asset_key") or "").strip().upper()
+            if not key:
+                continue
+            conn.execute(
+                """
+                INSERT INTO cap_allocations (
+                    asset_key, asset_class, large_pct, mid_pct, small_pct, other_pct, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(asset_key) DO UPDATE SET
+                    asset_class = excluded.asset_class,
+                    large_pct = excluded.large_pct,
+                    mid_pct = excluded.mid_pct,
+                    small_pct = excluded.small_pct,
+                    other_pct = excluded.other_pct,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    key,
+                    str(r.get("asset_class") or "EQUITY").strip().upper(),
+                    round(float(r.get("large_pct") or 0.0), 2),
+                    round(float(r.get("mid_pct") or 0.0), 2),
+                    round(float(r.get("small_pct") or 0.0), 2),
+                    round(float(r.get("other_pct") or 0.0), 2),
+                    now,
+                ),
+            )
+            saved += 1
+        conn.commit()
+    return saved
 
 
 def run_readonly_query(sql: str, db_path: Path | str | None = None) -> list[dict[str, Any]]:

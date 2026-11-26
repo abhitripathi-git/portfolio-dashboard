@@ -8,7 +8,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from dotenv import load_dotenv, set_key
 
@@ -20,6 +20,7 @@ from core.db import (
     query_other_assets,
     query_transactions,
     run_readonly_query,
+    upsert_cap_allocations,
 )
 from core.market_data import fetch_mf_nav
 
@@ -90,6 +91,12 @@ def _normalize_benchmark_key(benchmark: str | None) -> str:
     return raw
 
 
+def _model_order(model: str) -> list[str]:
+    return [model] + [
+        m for m in ("gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash") if m != model
+    ]
+
+
 def _aggregate_locally(holdings: list[dict[str, Any]], field: str, default_val: str) -> list[dict[str, Any]]:
     groups: dict[str, dict[str, float]] = {}
     total_curr = sum(float(h.get("current_value", 0.0)) for h in holdings)
@@ -99,22 +106,58 @@ def _aggregate_locally(holdings: list[dict[str, Any]], field: str, default_val: 
         g["positions"] += 1
         g["invested"] += float(h.get("invested_value", 0.0))
         g["current"] += float(h.get("current_value", 0.0))
-    out = []
-    for key, g in sorted(groups.items(), key=lambda x: x[1]["current"], reverse=True):
-        inv, cur = g["invested"], g["current"]
-        pnl = cur - inv
-        out.append(
-            {
-                field: key,
-                "positions": int(g["positions"]),
-                "invested": round(inv, 2),
-                "current": round(cur, 2),
-                "pnl": round(pnl, 2),
-                "pnl_pct": round((pnl / inv * 100.0) if inv > 0 else 0.0, 2),
-                "weight_pct": round((cur / total_curr * 100.0) if total_curr > 0 else 0.0, 2),
-            }
+    return [
+        {
+            field: k,
+            "positions": int(g["positions"]),
+            "invested": round(g["invested"], 2),
+            "current": round(g["current"], 2),
+            "pnl": round(g["current"] - g["invested"], 2),
+            "pnl_pct": round(((g["current"] - g["invested"]) / g["invested"] * 100.0) if g["invested"] > 0 else 0.0, 2),
+            "weight_pct": round((g["current"] / total_curr * 100.0) if total_curr > 0 else 0.0, 2),
+        }
+        for k, g in sorted(groups.items(), key=lambda x: x[1]["current"], reverse=True)
+    ]
+
+
+def _prepare_gemini_request(
+    prompt: str,
+    history: list[dict[str, str]] | None,
+    active_owner: str | None,
+    db_path: Path | str,
+    precomputed_snapshot: dict[str, Any] | None,
+) -> tuple[str, list[Any]]:
+    from google.genai import types
+
+    owner_hint = active_owner or "Combined (Abhishek & Tanu)"
+    try:
+        raw_ctx = build_local_portfolio_context(
+            active_owner=active_owner,
+            db_path=db_path,
+            precomputed_snapshot=precomputed_snapshot,
         )
-    return out
+    except Exception:
+        raw_ctx = "{}"
+
+    system_instruction = (
+        "You are a fast, precise Indian stock & mutual fund portfolio analyst for Abhishek and Tanu. "
+        f"Active dashboard scope: {owner_hint}. Today's date: {date.today().isoformat()}.\n\n"
+        "CLOUD-FIRST ANALYSIS RULE:\n"
+        "- The JSON below is the complete raw dataset from SQLite + live prices (holdings, mutual funds, "
+        "alternative assets, and transactions).\n"
+        "- Compute all comparisons (RC Capital vs Fintrekk Capital, India vs Foreign, top/bottom performers, "
+        "MF overlap from scheme factsheets, and trade history) directly in the cloud from this raw data.\n"
+        "- Format INR amounts cleanly (e.g., ₹12.45 L or ₹1,24,500) and mention any warnings transparently.\n\n"
+        f"RAW_PORTFOLIO_DATA={raw_ctx}"
+    )
+    contents: list[types.Content] = []
+    for msg in (history or [])[-10:]:
+        role = "model" if msg.get("role") == "assistant" else "user"
+        text = str(msg.get("content", "")).strip()
+        if text:
+            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
+    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=prompt)]))
+    return system_instruction, contents
 
 
 def build_local_portfolio_context(
@@ -122,7 +165,7 @@ def build_local_portfolio_context(
     db_path: Path | str = DB_PATH,
     precomputed_snapshot: dict[str, Any] | None = None,
 ) -> str:
-    """Compute a compact local portfolio digest on the Mac so Gemini avoids slow tool round-trips."""
+    """Serialize raw holdings, MFs, alternative assets, and transactions for Gemini Cloud."""
     target_db = Path(db_path)
     owner_arg = (
         None
@@ -137,10 +180,13 @@ def build_local_portfolio_context(
         snap = get_portfolio_snapshot(owner=owner_arg, include_mf=True, db_path=target_db)
 
     holdings = snap.get("holdings", [])
-    compact_holdings = [
+    raw_holdings = [
         {
+            "owner": h.get("owner"),
             "sym": h.get("symbol") if h.get("asset_class") == "EQUITY" else h.get("scheme_name"),
-            "cls": "EQ" if h.get("asset_class") == "EQUITY" else "MF",
+            "cls": h.get("asset_class"),
+            "type": h.get("asset_type", "EQUITY"),
+            "amfi": h.get("amfi_code", ""),
             "qty": h.get("quantity"),
             "avg": h.get("avg_price"),
             "ltp": h.get("current_price"),
@@ -156,52 +202,39 @@ def build_local_portfolio_context(
         for h in holdings
     ]
 
-    by_pnl = sorted(holdings, key=lambda x: float(x.get("unrealized_pnl", 0.0)))
-    losers = [
-        {
-            "sym": h.get("symbol") or h.get("scheme_name"),
-            "pnl": h.get("unrealized_pnl"),
-            "pnl_pct": h.get("unrealized_pnl_pct"),
-            "adv": h.get("advisory_source", "Self"),
-        }
-        for h in by_pnl[:5]
-    ]
-    gainers = [
-        {
-            "sym": h.get("symbol") or h.get("scheme_name"),
-            "pnl": h.get("unrealized_pnl"),
-            "pnl_pct": h.get("unrealized_pnl_pct"),
-            "adv": h.get("advisory_source", "Self"),
-        }
-        for h in reversed(by_pnl[-5:])
-    ]
-
-    tx_meta: dict[str, Any] = {}
+    raw_txs: list[list[Any]] = []
     try:
-        tx_rows = run_readonly_query(
-            "SELECT COUNT(*) AS cnt, MIN(trade_date) AS min_dt, MAX(trade_date) AS max_dt FROM transactions",
-            db_path=target_db,
-        )
-        if tx_rows:
-            tx_meta = tx_rows[0]
+        tx_rows = query_transactions(owner=owner_arg, db_path=target_db)
+        raw_txs = [
+            [
+                tx.get("trade_date"),
+                tx.get("owner"),
+                tx.get("symbol"),
+                tx.get("side"),
+                tx.get("quantity"),
+                tx.get("price"),
+                tx.get("fees"),
+                tx.get("advisory_source", "Self"),
+            ]
+            for tx in tx_rows
+        ]
     except Exception:
         pass
 
     other_assets = query_other_assets(owner=owner_arg, db_path=target_db)
-    alt_invested = round(sum(float(a.get("invested_value") or 0.0) for a in other_assets), 2)
     alt_current = round(sum(float(a.get("current_value") or 0.0) for a in other_assets), 2)
     market_curr = float((snap.get("totals") or {}).get("current_value") or 0.0)
 
-    digest = {
+    payload = {
         "scope": snap.get("owner", owner_arg or "Combined"),
         "as_of": snap.get("as_of_date"),
         "totals": snap.get("totals", {}),
         "net_worth": {
             "market_current_value": round(market_curr, 2),
-            "alternative_invested_value": alt_invested,
             "alternative_current_value": alt_current,
             "total_net_worth": round(market_curr + alt_current, 2),
         },
+        "holdings": raw_holdings,
         "alternative_assets": [
             {
                 "owner": a.get("owner"),
@@ -214,15 +247,11 @@ def build_local_portfolio_context(
             }
             for a in other_assets
         ],
-        "by_advisory": _aggregate_locally(holdings, "advisory_source", "Self"),
-        "by_region": _aggregate_locally(holdings, "region", "India"),
-        "top_gainers": gainers,
-        "top_losers": losers,
-        "tx_summary": tx_meta,
-        "holdings": compact_holdings,
+        "tx_columns": ["date", "owner", "sym", "side", "qty", "price", "fees", "adv"],
+        "transactions": raw_txs,
         "warnings": snap.get("warnings", []),
     }
-    return json.dumps(_json_safe(digest), ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(_json_safe(payload), ensure_ascii=False, separators=(",", ":"))
 
 
 def build_portfolio_tools(db_path: Path | str = DB_PATH) -> tuple[list[Any], dict[str, Any]]:
@@ -405,6 +434,7 @@ def build_portfolio_tools(db_path: Path | str = DB_PATH) -> tuple[list[Any], dic
         - holding_baselines(id, account_id, symbol, isin, company_name, exchange, asset_type, quantity, avg_price, invested_value, as_of_date, source, region, advisory_source, advisory_notes, extra_data, updated_at)
         - mf_holdings(id, account_id, folio_number, scheme_name, amfi_code, isin, units, avg_nav, invested_value, as_of_date, source, region, advisory_source, advisory_notes, extra_data, updated_at)
         - other_assets(id, owner, name, category, invested_value, current_value, as_of_date, notes, extra_data, updated_at)
+        - cap_allocations(asset_key, asset_class, large_pct, mid_pct, small_pct, other_pct, updated_at)
         - symbol_aliases(raw_symbol, yahoo_symbol, isin, company_name, sector, updated_at)
         """
         rows = run_readonly_query(sql, db_path=target_db)
@@ -432,63 +462,32 @@ def ask_portfolio_gemini(
     db_path: Path | str = DB_PATH,
     max_tool_rounds: int = 8,
     precomputed_snapshot: dict[str, Any] | None = None,
+    enable_tools: bool = False,
 ) -> dict[str, Any]:
-    """Run a fast hybrid local+cloud Gemini query against the local portfolio DB."""
+    """Run a fast raw-data Gemini Cloud query (or multi-round tool query when `enable_tools=True`)."""
     if not api_key or not api_key.strip():
         raise ValueError("Missing Gemini API key.")
 
     from google import genai
     from google.genai import types
 
-    tools, tool_map = build_portfolio_tools(db_path=db_path)
-    owner_hint = active_owner or "Combined (Abhishek & Tanu)"
-
-    try:
-        local_digest = build_local_portfolio_context(
-            active_owner=active_owner,
-            db_path=db_path,
-            precomputed_snapshot=precomputed_snapshot,
-        )
-    except Exception:
-        local_digest = "{}"
-
-    system_instruction = (
-        "You are a fast, precise Indian stock & mutual fund portfolio analyst for Abhishek and Tanu. "
-        f"Active dashboard scope: {owner_hint}. Today's date: {date.today().isoformat()}.\n\n"
-        "HYBRID EXECUTION RULE (IMPORTANT FOR SPEED):\n"
-        "- The JSON below was ALREADY pre-computed locally on the user's Mac from SQLite + live prices.\n"
-        "- For summaries, current values, P&L, top/worst holdings, India vs Foreign breakdown, Advisory breakdown "
-        "(Self, RC Capital, Fintrekk Capital), Alternative & Fixed Assets (NPS/EPFO/PPF/Real Estate), and Total Net Worth, "
-        "answer DIRECTLY from this local snapshot in ONE turn without calling tools.\n"
-        "- Only invoke tools when you need something NOT in the snapshot: date-window benchmark simulations "
-        "(tool_compare_against_benchmark, which also supports region and advisory_source), individual trades "
-        "(tool_get_transactions_history), what-if exclusions, or another owner/account outside the active scope.\n"
-        "- For mutual fund overlap or factsheet composition questions, use the exact mutual fund scheme names, "
-        "AMFI codes, and direct equity symbols already provided in LOCAL_PORTFOLIO_DIGEST (or tool_get_mf_holdings_detail) "
-        "and perform the overlap & sector analysis directly in the cloud using live factsheet knowledge.\n"
-        "- Format INR amounts cleanly (e.g., ₹12.45 L or ₹1,24,500) and mention any warnings transparently.\n\n"
-        f"LOCAL_PORTFOLIO_DIGEST={local_digest}"
+    tools, tool_map = build_portfolio_tools(db_path=db_path) if enable_tools else ([], {})
+    system_instruction, contents = _prepare_gemini_request(
+        prompt=prompt,
+        history=history,
+        active_owner=active_owner,
+        db_path=db_path,
+        precomputed_snapshot=precomputed_snapshot,
     )
-
-    contents: list[types.Content] = []
-    for msg in (history or [])[-10:]:
-        role = "model" if msg.get("role") == "assistant" else "user"
-        text = str(msg.get("content", "")).strip()
-        if text:
-            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
-    contents.append(types.Content(role="user", parts=[types.Part.from_text(text=prompt)]))
 
     client = genai.Client(api_key=api_key.strip())
-    config = types.GenerateContentConfig(
-        system_instruction=system_instruction,
-        tools=tools,
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-        temperature=0.2,
-    )
+    config_kwargs: dict[str, Any] = {"system_instruction": system_instruction, "temperature": 0.2}
+    if enable_tools and tools:
+        config_kwargs["tools"] = tools
+        config_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+    config = types.GenerateContentConfig(**config_kwargs)
 
-    candidate_models = [model] + [
-        m for m in ("gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash") if m != model
-    ]
+    candidate_models = _model_order(model)
 
     def _call_with_fallback(active_model: str, req_contents: list[types.Content]) -> tuple[Any, str]:
         last_exc: Exception | None = None
@@ -552,3 +551,148 @@ def ask_portfolio_gemini(
         "tools_used": tool_trace,
         "model": used_model,
     }
+
+
+def stream_portfolio_gemini(
+    prompt: str,
+    history: list[dict[str, str]] | None = None,
+    api_key: str = "",
+    model: str = "gemini-3.6-flash",
+    active_owner: str | None = None,
+    db_path: Path | str = DB_PATH,
+    precomputed_snapshot: dict[str, Any] | None = None,
+) -> Iterator[str]:
+    """Single-shot streaming Gemini Cloud call with zero tool round-trips."""
+    if not api_key or not api_key.strip():
+        raise ValueError("Missing Gemini API key.")
+
+    from google import genai
+    from google.genai import types
+
+    system_instruction, contents = _prepare_gemini_request(
+        prompt=prompt,
+        history=history,
+        active_owner=active_owner,
+        db_path=db_path,
+        precomputed_snapshot=precomputed_snapshot,
+    )
+
+    client = genai.Client(api_key=api_key.strip())
+    config = types.GenerateContentConfig(system_instruction=system_instruction, temperature=0.2)
+    order = _model_order(model)
+
+    last_exc: Exception | None = None
+    for idx, cand in enumerate(order):
+        try:
+            for chunk in client.models.generate_content_stream(model=cand, contents=contents, config=config):
+                txt = getattr(chunk, "text", None)
+                if txt:
+                    yield txt
+            return
+        except Exception as exc:
+            msg = str(exc)
+            is_transient = ("503" in msg or "429" in msg or "UNAVAILABLE" in msg or "RESOURCE_EXHAUSTED" in msg)
+            if is_transient and idx < len(order) - 1:
+                last_exc = exc
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+
+
+def fetch_cap_allocations_via_gemini(
+    holdings: list[dict[str, Any]],
+    api_key: str,
+    model: str = "gemini-3.6-flash",
+    db_path: Path | str = DB_PATH,
+) -> dict[str, Any]:
+    """Fetch approximate Large/Mid/Small/Other % split for unique holdings in one Gemini JSON call."""
+    if not api_key or not api_key.strip():
+        raise ValueError("Missing Gemini API key.")
+
+    seen: dict[str, dict[str, str]] = {}
+    for h in holdings:
+        if str(h.get("region") or "India").strip().lower() == "foreign":
+            continue
+        is_eq = h.get("asset_class") == "EQUITY"
+        key = str(h.get("symbol") if is_eq else h.get("scheme_name") or "").strip()
+        if not key:
+            continue
+        ukey = key.upper()
+        if ukey not in seen:
+            seen[ukey] = {
+                "key": ukey,
+                "name": str(h.get("company_name") or key) if is_eq else key,
+                "cls": "EQUITY" if is_eq else "MF",
+            }
+    if not seen:
+        return {"saved": 0, "model": model}
+
+    from google import genai
+    from google.genai import types
+
+    prompt = (
+        "Estimate the current SEBI-aligned market-cap allocation percentages (large, mid, small, other) "
+        "for each Indian/foreign stock, ETF, or mutual fund below.\n"
+        "- For an individual stock or pure index ETF (e.g. Nifty 50 / NASDAQ 100), put 100 in its primary cap "
+        "bucket (or 100 in 'other' for Liquid ETFs).\n"
+        "- For mutual funds / SIFs, give approximate portfolio weights summing to 100.\n"
+        "- Return ONLY a JSON object mapping each exact 'key' string to {\"large\": number, \"mid\": number, "
+        "\"small\": number, \"other\": number}.\n\n"
+        f"ASSETS={json.dumps(list(seen.values()), ensure_ascii=False, separators=(',', ':'))}"
+    )
+
+    client = genai.Client(api_key=api_key.strip())
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        temperature=0.1,
+    )
+    order = _model_order(model)
+    resp = None
+    used_model = model
+    last_exc: Exception | None = None
+    for idx, cand in enumerate(order):
+        try:
+            resp = client.models.generate_content(model=cand, contents=prompt, config=config)
+            used_model = cand
+            break
+        except Exception as exc:
+            msg = str(exc)
+            if ("503" in msg or "429" in msg or "UNAVAILABLE" in msg or "RESOURCE_EXHAUSTED" in msg) and idx < len(order) - 1:
+                last_exc = exc
+                continue
+            raise
+    if resp is None:
+        raise last_exc or RuntimeError("Gemini failed to return cap allocations.")
+
+    raw_text = (getattr(resp, "text", None) or "").strip()
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`").lstrip("json").strip()
+    parsed = json.loads(raw_text or "{}")
+
+    rows_to_save: list[dict[str, Any]] = []
+    for ukey, meta in seen.items():
+        entry = parsed.get(ukey) or parsed.get(meta["name"])
+        if not isinstance(entry, dict):
+            continue
+        lg = max(0.0, float(entry.get("large") or 0.0))
+        md = max(0.0, float(entry.get("mid") or 0.0))
+        sm = max(0.0, float(entry.get("small") or 0.0))
+        ot = max(0.0, float(entry.get("other") or 0.0))
+        tot = lg + md + sm + ot
+        if tot <= 0:
+            continue
+        scale = 100.0 / tot
+        rows_to_save.append(
+            {
+                "asset_key": ukey,
+                "asset_class": meta["cls"],
+                "large_pct": round(lg * scale, 2),
+                "mid_pct": round(md * scale, 2),
+                "small_pct": round(sm * scale, 2),
+                "other_pct": round(ot * scale, 2),
+            }
+        )
+
+    saved = upsert_cap_allocations(rows_to_save, db_path=db_path)
+    return {"saved": saved, "requested": len(seen), "model": used_model}

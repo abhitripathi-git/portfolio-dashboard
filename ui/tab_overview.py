@@ -11,11 +11,14 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from core.analytics import compute_cap_distribution
 from core.db import (
+    query_cap_allocations,
     query_holding_baselines,
     query_other_assets,
     query_transactions,
 )
+from core.gemini_chat import fetch_cap_allocations_via_gemini, load_env_api_key
 from ui.formatters import (
     COLOR_PALETTE,
     format_inr,
@@ -407,7 +410,112 @@ def render_overview_tab(snapshot: dict[str, Any], selection: SidebarSelection) -
 
     st.divider()
 
-    # 4. System, Sync & Tech Settings Section
+    # 4. Market-Cap Distribution (Instant SQLite cache + 1-click Gemini refresh)
+    if holdings:
+        c_cap_hdr, c_cap_seg, c_cap_btn = st.columns([2.2, 1.4, 1.1], vertical_alignment="bottom")
+        with c_cap_hdr:
+            st.subheader("Market-Cap Distribution")
+        with c_cap_seg:
+            adv_choices = sorted({str(h.get("advisory_source") or "Self").strip() for h in holdings})
+            seg_options = ["All Combined", "Equities Only", "Mutual Funds Only"] + adv_choices
+            cap_segment = st.selectbox(
+                "Segment",
+                options=seg_options,
+                index=0,
+                key="overview_cap_segment",
+            )
+        with c_cap_btn:
+            refresh_cap = st.button(
+                "Refresh Cap Split",
+                icon=":material/auto_awesome:",
+                width="stretch",
+                key="overview_refresh_cap_btn",
+                help="Sends your unique stock & MF names to Gemini once and caches Large/Mid/Small % in SQLite.",
+            )
+
+        if refresh_cap:
+            api_key = st.session_state.get("gemini_api_key") or load_env_api_key()
+            if not api_key:
+                st.warning("Set your `GEMINI_API_KEY` in **Ask Gemini → Settings & Configuration** first.")
+            else:
+                model_choice = st.session_state.get("gemini_model_choice", "gemini-3.6-flash")
+                with st.spinner("Fetching Large / Mid / Small Cap split from Gemini..."):
+                    try:
+                        cap_res = fetch_cap_allocations_via_gemini(
+                            holdings=holdings,
+                            api_key=api_key,
+                            model=model_choice,
+                            db_path=db_path,
+                        )
+                        st.toast(f"Updated cap split for {cap_res['saved']} assets via {cap_res['model']}.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Cap split refresh failed: {exc}")
+
+        cap_map = query_cap_allocations(db_path=db_path)
+        cap_dist = compute_cap_distribution(holdings, cap_map, segment=cap_segment)
+        if cap_dist["mapped_count"] == 0:
+            st.info(
+                "No cached Large/Mid/Small Cap split yet. Click **Refresh Cap Split** to fetch approximate weights "
+                "from Gemini once (saved locally for instant loading)."
+            )
+        else:
+            cap_tiles_html = (
+                '<div class="tech-grid" style="margin-bottom:0.85rem;">'
+                '<div class="tech-tile">'
+                '<div class="tech-tile-label">Large Cap</div>'
+                f'<div class="tech-tile-val">{cap_dist["large_pct"]:.1f}%</div>'
+                f'<div class="tech-tile-sub">{html.escape(format_inr_compact(cap_dist["large_val"]))}</div>'
+                '</div>'
+                '<div class="tech-tile">'
+                '<div class="tech-tile-label">Mid Cap</div>'
+                f'<div class="tech-tile-val">{cap_dist["mid_pct"]:.1f}%</div>'
+                f'<div class="tech-tile-sub">{html.escape(format_inr_compact(cap_dist["mid_val"]))}</div>'
+                '</div>'
+                '<div class="tech-tile">'
+                '<div class="tech-tile-label">Small Cap</div>'
+                f'<div class="tech-tile-val">{cap_dist["small_pct"]:.1f}%</div>'
+                f'<div class="tech-tile-sub">{html.escape(format_inr_compact(cap_dist["small_val"]))}</div>'
+                '</div>'
+                '<div class="tech-tile">'
+                '<div class="tech-tile-label">Other / Coverage</div>'
+                f'<div class="tech-tile-val">{cap_dist["other_pct"]:.1f}%</div>'
+                f'<div class="tech-tile-sub">Mapped: {cap_dist["mapped_count"]}/{cap_dist["total_count"]} ({cap_dist["coverage_pct"]:.0f}%) · {html.escape(cap_dist["last_updated"])}</div>'
+                '</div>'
+                '</div>'
+            )
+            st.markdown(cap_tiles_html, unsafe_allow_html=True)
+
+            cap_chart_df = pd.DataFrame(
+                [
+                    {"Bucket": b, "Value": v, "Share": p}
+                    for b, v, p in [
+                        ("Large Cap", cap_dist["large_val"], cap_dist["large_pct"]),
+                        ("Mid Cap", cap_dist["mid_val"], cap_dist["mid_pct"]),
+                        ("Small Cap", cap_dist["small_val"], cap_dist["small_pct"]),
+                        ("Other / Debt", cap_dist["other_val"], cap_dist["other_pct"]),
+                    ]
+                    if v > 0
+                ]
+            )
+            if not cap_chart_df.empty:
+                fig_cap = px.bar(
+                    cap_chart_df,
+                    x="Share",
+                    y="Bucket",
+                    orientation="h",
+                    text=cap_chart_df.apply(lambda r: f"{r['Share']:.1f}% ({format_inr_compact(r['Value'])})", axis=1),
+                    color="Bucket",
+                    color_discrete_sequence=COLOR_PALETTE[:4],
+                )
+                fig_cap.update_traces(textposition="outside", hovertemplate="%{y}: %{x:.1f}%<extra></extra>")
+                style_plotly_fig(fig_cap, title=f"Cap Split — {cap_segment}", height=240)
+                fig_cap.update_layout(showlegend=False, hovermode="closest", yaxis_title="", xaxis_title="Weight %", xaxis_range=[0, 115])
+                st.plotly_chart(fig_cap, width="stretch")
+
+    st.divider()
+
+    # 5. System, Sync & Tech Settings Section
     baselines = query_holding_baselines(
         owner=selection.owner, account_id=selection.account_id, db_path=db_path
     )

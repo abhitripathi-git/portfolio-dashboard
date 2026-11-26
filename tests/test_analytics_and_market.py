@@ -488,3 +488,117 @@ def test_compare_mf_vs_benchmark(tmp_path: Path):
     assert all_res["summary"]["alpha_twr_pct"] == pytest.approx(5.0)
     assert single_res["summary"]["portfolio_end_value"] == pytest.approx(11000.0)
     assert len(single_res["included_symbols"]) == 1
+
+
+def test_cap_distribution_and_gemini_refresh(tmp_path: Path):
+    """Verify cap_allocations DB cache, value-weighted cap math across segments, and Gemini JSON import."""
+    import json
+    from types import SimpleNamespace
+    from core.analytics import compute_cap_distribution
+    from core.db import init_db, query_cap_allocations
+    from core.gemini_chat import fetch_cap_allocations_via_gemini
+
+    db_path = tmp_path / "cap.db"
+    init_db(db_path, seed_default_owners=False)
+
+    holdings = [
+        {"asset_class": "EQUITY", "symbol": "RELIANCE", "company_name": "Reliance Industries", "region": "India", "advisory_source": "RC Capital", "current_value": 60000.0},
+        {"asset_class": "EQUITY", "symbol": "SMALLCO", "company_name": "Small Cap Co", "region": "India", "advisory_source": "Fintrekk Capital", "current_value": 40000.0},
+        {"asset_class": "MF", "scheme_name": "Flexi Cap Fund", "region": "India", "advisory_source": "Self", "current_value": 100000.0},
+        {"asset_class": "EQUITY", "symbol": "MON100", "company_name": "MOMF NASDAQ 100 ETF", "region": "Foreign", "advisory_source": "Self", "current_value": 500000.0},
+        {"asset_class": "MF", "scheme_name": "Parag Parikh IFSC NASDAQ 100 FoF", "region": "Foreign", "advisory_source": "Self", "current_value": 200000.0},
+    ]
+
+    fake_payload = {
+        "RELIANCE": {"large": 100, "mid": 0, "small": 0, "other": 0},
+        "SMALLCO": {"large": 0, "mid": 0, "small": 100, "other": 0},
+        "FLEXI CAP FUND": {"large": 60, "mid": 30, "small": 10, "other": 0},
+    }
+
+    class FakeModels:
+        def generate_content(self, model, contents, config):
+            return SimpleNamespace(text=json.dumps(fake_payload))
+
+    class FakeClient:
+        def __init__(self, api_key: str):
+            self.models = FakeModels()
+
+    with patch("google.genai.Client", FakeClient):
+        res = fetch_cap_allocations_via_gemini(
+            holdings=holdings,
+            api_key="fake-key",
+            db_path=db_path,
+        )
+
+    assert res["saved"] == 3
+    cap_map = query_cap_allocations(db_path=db_path)
+    assert len(cap_map) == 3
+
+    all_dist = compute_cap_distribution(holdings, cap_map, segment="All Combined")
+    # Large = 60k + 60k = 120k (60%), Mid = 30k (15%), Small = 40k + 10k = 50k (25%)
+    assert all_dist["large_pct"] == pytest.approx(60.0)
+    assert all_dist["mid_pct"] == pytest.approx(15.0)
+    assert all_dist["small_pct"] == pytest.approx(25.0)
+    assert all_dist["coverage_pct"] == pytest.approx(100.0)
+
+    eq_dist = compute_cap_distribution(holdings, cap_map, segment="Equities Only")
+    assert eq_dist["large_pct"] == pytest.approx(60.0)
+    assert eq_dist["small_pct"] == pytest.approx(40.0)
+
+    rc_dist = compute_cap_distribution(holdings, cap_map, segment="RC Capital")
+    assert rc_dist["large_pct"] == pytest.approx(100.0)
+    assert rc_dist["total_count"] == 1
+
+
+def test_mf_usd_conversion_and_usd_xirr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify USD-denominated MF holdings & transactions convert cleanly to INR in snapshot and XIRR."""
+    import core.analytics as analytics
+    from core.db import get_or_create_account, init_db, insert_transactions, upsert_mf_holdings
+
+    db_path = tmp_path / "mf_usd.db"
+    init_db(db_path, seed_default_owners=False)
+    acc = get_or_create_account("Abhishek", broker="PPFAS IFSC", account_name="PPFAS GIFT", db_path=db_path)
+
+    upsert_mf_holdings(
+        acc["id"],
+        [
+            {
+                "folio_number": "10004193",
+                "scheme_name": "Parag Parikh IFSC NASDAQ 100 FoF",
+                "amfi_code": "PPFAS_GIFT",
+                "units": 100.0,
+                "avg_nav": 100.0,
+                "invested_value": 10000.0,
+                "as_of_date": "2026-11-26",
+                "region": "Foreign",
+                "extra_data": {"cost_currency": "USD", "live_currency": "USD", "manual_ltp": 110.0},
+            }
+        ],
+        db_path=db_path,
+    )
+    insert_transactions(
+        acc["id"],
+        [
+            {
+                "trade_date": "2025-11-26",
+                "symbol": "PPFAS_GIFT",
+                "exchange": "IFSC",
+                "asset_type": "MF",
+                "side": "BUY",
+                "quantity": 100.0,
+                "price": 100.0,
+                "amount": 10000.0,
+                "extra_data": {"currency": "USD"},
+            }
+        ],
+        db_path=db_path,
+    )
+
+    monkeypatch.setattr(analytics, "fetch_usdinr_rate", lambda: 90.0)
+    snap = analytics.get_portfolio_snapshot(owner="Abhishek", db_path=db_path)
+    mf = snap["mf_holdings"][0]
+    assert mf["invested_value"] == pytest.approx(900000.0)
+    assert mf["current_value"] == pytest.approx(990000.0)
+    assert mf["unrealized_pnl_pct"] == pytest.approx(10.0)
+    # 1 year hold from 2025-11-26 to 2026-11-26 (+10% gain in both USD & INR) -> XIRR ~ 10%
+    assert snap["totals"]["xirr"] == pytest.approx(0.10, abs=0.01)

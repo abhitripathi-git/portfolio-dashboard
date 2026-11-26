@@ -136,8 +136,18 @@ def render_alt_assets_tab(snapshot: dict[str, Any], selection: SidebarSelection)
         st.divider()
 
     st.markdown("##### Edit & Add Alternative Assets")
-    editor_cols = ["owner", "name", "category", "invested_value", "current_value", "as_of_date", "notes"]
-    alt_df = pd.DataFrame(other_rows)[editor_cols].copy() if other_rows else pd.DataFrame(columns=editor_cols)
+    alt_show_meta = st.toggle(
+        "Show valuation date & notes",
+        value=False,
+        key=f"alt_show_meta_{selection.owner or 'all'}",
+    )
+    all_editor_cols = ["owner", "name", "category", "invested_value", "current_value", "as_of_date", "notes"]
+    visible_cols = (
+        all_editor_cols
+        if alt_show_meta
+        else (["owner"] if selection.owner is None else []) + ["name", "category", "invested_value", "current_value"]
+    )
+    alt_df = pd.DataFrame(other_rows)[visible_cols].copy() if other_rows else pd.DataFrame(columns=visible_cols)
 
     edited_alt_df = st.data_editor(
         alt_df,
@@ -178,20 +188,34 @@ def render_alt_assets_tab(snapshot: dict[str, Any], selection: SidebarSelection)
             width="stretch",
             key=f"save_alt_btn_{selection.owner or 'all'}",
         ):
+            existing_meta = {
+                (str(r.get("owner") or "").strip().lower(), str(r.get("name") or "").strip().lower()): r
+                for r in other_rows
+            }
             payload: list[dict[str, Any]] = []
             for row in edited_alt_df.to_dict(orient="records"):
                 nm = "" if pd.isna(row.get("name")) else str(row.get("name")).strip()
                 if not nm:
                     continue
                 ow = "" if pd.isna(row.get("owner")) else str(row.get("owner")).strip()
+                eff_ow = ow or selection.owner or "Abhishek"
+                prev = existing_meta.get((eff_ow.lower(), nm.lower()), {})
                 cat = "" if pd.isna(row.get("category")) else str(row.get("category")).strip()
                 inv_v = 0.0 if pd.isna(row.get("invested_value")) else float(row.get("invested_value"))
                 cur_v = 0.0 if pd.isna(row.get("current_value")) else float(row.get("current_value"))
-                dt_v = "" if pd.isna(row.get("as_of_date")) else str(row.get("as_of_date")).strip()
-                note_v = "" if pd.isna(row.get("notes")) else str(row.get("notes")).strip()
+                dt_v = (
+                    ("" if pd.isna(row.get("as_of_date")) else str(row.get("as_of_date")).strip())
+                    if "as_of_date" in row
+                    else str(prev.get("as_of_date") or "").strip()
+                )
+                note_v = (
+                    ("" if pd.isna(row.get("notes")) else str(row.get("notes")).strip())
+                    if "notes" in row
+                    else str(prev.get("notes") or "").strip()
+                )
                 payload.append(
                     {
-                        "owner": ow or selection.owner or "Abhishek",
+                        "owner": eff_ow,
                         "name": nm,
                         "category": cat or "Other",
                         "invested_value": inv_v,

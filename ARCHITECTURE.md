@@ -31,10 +31,9 @@ portfolio-dashboard/
 │   ├── cams_cas.py               # CAMS/KFintech CAS PDF/XLSX/CSV MF parser & importer (casparser + pdfplumber)
 │   └── manual_delta.py           # Shorthand text/CSV monthly delta parser (`YYYY-MM-DD BUY SYMBOL QTY @ PRICE`)
 ├── ui/
-│   ├── formatters.py             # Theme-adaptive CSS, Indian INR formatting (lakhs/crores), extra_data expansion
 │   ├── data_service.py           # Streamlit `@st.cache_data` wrappers + `get_enriched_snapshot`
-│   ├── demo_data.py              # Isolated demo DB seeder (`data/demo_portfolio.db`)
-│   ├── sidebar.py                # Demo toggle, owner/account filters, Refresh Prices, Restart App, DB status
+│   ├── formatters.py             # Material WealthTech CSS, Indian INR formatting, extra_data expansion
+│   ├── sidebar.py                # Owner/account filters, Refresh/Restart, Sync Online (Drive DB + GitHub), DB status
 │   ├── tab_overview.py           # KPIs, Net Worth strip, allocation, advisory & geography breakdowns
 │   ├── tab_benchmark.py          # Overall Combined + Benchmark + Segment & MF dropdowns
 │   ├── tab_holdings.py           # Searchable/filterable Equity/SIF, MF, and Transactions tables + Movers chart

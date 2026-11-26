@@ -479,6 +479,8 @@ def run_readonly_sql(sql: str) -> dict[str, Any]:
       advisory_notes, extra_data, updated_at)
     - other_assets(id, owner, name, category, invested_value, current_value,
       as_of_date, notes, extra_data, updated_at)
+    - cap_allocations(asset_key, asset_class, large_pct, mid_pct, small_pct,
+      other_pct, updated_at)
     - symbol_aliases(raw_symbol, yahoo_symbol, isin, company_name, sector, updated_at)
     - import_logs(id, account_id, source_type, filename, rows_inserted, rows_skipped,
       notes, imported_at)

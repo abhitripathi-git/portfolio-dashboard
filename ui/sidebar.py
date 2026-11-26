@@ -11,7 +11,7 @@ import streamlit.components.v1 as components
 
 from config import DB_PATH, DEFAULT_OWNERS
 from core.db import init_db, list_accounts
-from core.server_control import schedule_server_restart, sync_backup_to_cloud, sync_code_to_github
+from core.server_control import schedule_server_restart, sync_online
 from ui.data_service import invalidate_all_caches, load_db_status
 
 
@@ -105,34 +105,20 @@ def render_sidebar() -> SidebarSelection:
                 )
                 st.stop()
 
-        b_drive, b_git = st.columns(2)
-        with b_drive:
-            if st.button(
-                "Drive DB",
-                icon=":material/cloud_upload:",
-                width="stretch",
-                key="sidebar_backup_sync_btn",
-                help="Atomically snapshots portfolio.db + portable zip to Google Drive.",
-            ):
-                with st.spinner("Syncing DB..."):
-                    b_res = sync_backup_to_cloud(active_db)
-                st.toast(f"Backup synced ({b_res['mode']})")
-                st.session_state["sidebar_backup_msg"] = b_res["message"]
-        with b_git:
-            if st.button(
-                "GitHub",
-                icon=":material/code:",
-                width="stretch",
-                key="sidebar_github_sync_btn",
-                help="Commits and pushes code changes to your private GitHub repo (excludes DB & .env).",
-            ):
-                with st.spinner("Pushing code..."):
-                    g_res = sync_code_to_github()
-                if g_res.get("ok"):
-                    st.toast("Code synced to GitHub")
-                else:
-                    st.toast("GitHub sync needs attention", icon="⚠️")
-                st.session_state["sidebar_backup_msg"] = str(g_res.get("message", ""))
+        if st.button(
+            "Sync Online",
+            icon=":material/cloud_sync:",
+            width="stretch",
+            key="sidebar_sync_online_btn",
+            help="Snapshots portfolio.db to Google Drive and pushes code changes to GitHub.",
+        ):
+            with st.spinner("Syncing DB to Drive & code to GitHub..."):
+                sync_res = sync_online(active_db)
+            if sync_res.get("ok"):
+                st.toast("Synced DB to Drive & code to GitHub")
+            else:
+                st.toast("Drive DB synced (check GitHub note)", icon="⚠️")
+            st.session_state["sidebar_backup_msg"] = str(sync_res.get("message", ""))
 
         if st.session_state.get("sidebar_backup_msg"):
             st.caption(st.session_state["sidebar_backup_msg"])

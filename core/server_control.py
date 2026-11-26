@@ -216,3 +216,26 @@ def sync_code_to_github(repo_dir: Path | None = None) -> dict[str, object]:
 
     note = "Committed & pushed" if committed else "Already up-to-date; pushed"
     return {"ok": True, "committed": committed, "message": f"{note} to GitHub at {ts}"}
+
+
+def sync_online(db_path: Path, backup_dir: Path | None = None) -> dict[str, object]:
+    """Single-click online sync: DB + zip to Google Drive, and code changes to GitHub."""
+    from datetime import datetime
+
+    drive_res = sync_backup_to_cloud(db_path, backup_dir=backup_dir)
+    git_res = sync_code_to_github()
+    ts = datetime.now().strftime("%H:%M")
+
+    if git_res.get("ok"):
+        return {
+            "ok": True,
+            "drive": drive_res,
+            "github": git_res,
+            "message": f"Synced {drive_res['mode']} + GitHub at {ts}",
+        }
+    return {
+        "ok": False,
+        "drive": drive_res,
+        "github": git_res,
+        "message": f"{drive_res['mode']} synced at {ts} · GitHub: {git_res.get('message', 'push skipped')}",
+    }

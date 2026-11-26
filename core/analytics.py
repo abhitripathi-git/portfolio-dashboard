@@ -178,6 +178,7 @@ def _compute_portfolio_xirr_from_transactions(
 
     eq_cfs: list[tuple[date, float]] = []
     mf_cfs: list[tuple[date, float]] = []
+    tx_fx: float | None = None
 
     for tx in txs:
         sym = str(tx.get("symbol", "")).strip().upper()
@@ -187,6 +188,13 @@ def _compute_portfolio_xirr_from_transactions(
         side = str(tx.get("side", "")).strip().upper()
         amt = float(tx.get("amount") or (float(tx.get("quantity", 0.0)) * float(tx.get("price", 0.0))))
         fees = float(tx.get("fees") or 0.0)
+        extra = tx.get("extra_data") if isinstance(tx.get("extra_data"), dict) else {}
+        if str(extra.get("currency") or "INR").strip().upper() == "USD":
+            if tx_fx is None:
+                fetched_fx = fetch_usdinr_rate()
+                tx_fx = fetched_fx if (fetched_fx is not None and fetched_fx > 0) else 85.0
+            amt *= tx_fx
+            fees *= tx_fx
         dt = _to_date(tx["trade_date"])
 
         if side == "BUY":
@@ -235,11 +243,19 @@ def get_portfolio_snapshot(
             and str(m.get("scheme_name", "")).strip().upper() not in excluded_set
         ]
 
-    unique_eq_symbols = sorted({str(r["symbol"]).strip().upper() for r in eq_rows if r.get("symbol")})
+    unique_eq_symbols = sorted(
+        {
+            str(r["symbol"]).strip().upper()
+            for r in eq_rows
+            if r.get("symbol")
+            and not (isinstance(r.get("extra_data"), dict) and r["extra_data"].get("manual_ltp") is not None)
+        }
+    )
     unique_mf_keys: list[tuple[str, str]] = list(
         dict.fromkeys(
             (str(m.get("amfi_code", "")).strip(), str(m.get("scheme_name", "")).strip())
             for m in mf_rows
+            if not (isinstance(m.get("extra_data"), dict) and m["extra_data"].get("manual_ltp") is not None)
         )
     )
 
@@ -370,17 +386,36 @@ def get_portfolio_snapshot(
 
     for m in mf_rows:
         units = float(m.get("units", 0.0))
+        extra = m.get("extra_data") if isinstance(m.get("extra_data"), dict) else {}
+        cost_ccy = str(extra.get("cost_currency") or extra.get("currency") or "INR").strip().upper()
         avg_nav = float(m.get("avg_nav", 0.0))
         invested = float(m.get("invested_value") or round(units * avg_nav, 2))
+        if cost_ccy == "USD":
+            fx = _get_fx()
+            avg_nav *= fx
+            invested *= fx
+
         key = (str(m.get("amfi_code", "")).strip(), str(m.get("scheme_name", "")).strip())
         nav_info = mf_nav_cache.get(key)
+        live_nav_raw = nav_info.get("nav") if (nav_info and nav_info.get("nav") is not None) else None
+        live_ccy = "INR"
+        if live_nav_raw is None and extra.get("manual_ltp") is not None:
+            try:
+                live_nav_raw = float(extra["manual_ltp"])
+                live_ccy = str(
+                    extra.get("live_currency") or extra.get("currency") or cost_ccy or "INR"
+                ).strip().upper()
+            except (TypeError, ValueError):
+                live_nav_raw = None
 
-        if nav_info and nav_info.get("nav") is not None:
-            curr_nav = float(nav_info["nav"])
+        if live_nav_raw is not None:
+            curr_nav = float(live_nav_raw)
+            if live_ccy == "USD":
+                curr_nav *= _get_fx()
             curr_val = units * curr_nav
             price_missing = False
-            resolved_code = nav_info.get("scheme_code") or key[0]
-            nav_date = nav_info.get("last_updated", "")
+            resolved_code = (nav_info.get("scheme_code") if nav_info else None) or key[0]
+            nav_date = (nav_info.get("last_updated") if nav_info else None) or str(extra.get("nav_date") or "")
         else:
             curr_nav = None
             curr_val = invested
@@ -1258,17 +1293,26 @@ def compare_mf_vs_benchmark(
             [], [], warnings,
         )
 
-    # Aggregate units by scheme key (amfi_code or scheme_name)
+    # Aggregate units by scheme key (amfi_code or scheme_name), skipping non-AMFI snapshot funds
     units_map: dict[str, float] = {}
     meta_map: dict[str, tuple[str, str]] = {}
     for m in mf_rows:
         code = str(m.get("amfi_code", "")).strip()
         sname = str(m.get("scheme_name", "")).strip()
+        extra = m.get("extra_data") if isinstance(m.get("extra_data"), dict) else {}
+        if extra.get("manual_ltp") is not None and (not code or not code.isdigit()):
+            warnings.append(f"Daily historical NAV curve unavailable for non-AMFI fund '{sname}'.")
+            continue
         key = code or sname
         units_map[key] = units_map.get(key, 0.0) + float(m.get("units", 0.0))
         meta_map[key] = (code, sname)
 
     keys = sorted(units_map.keys())
+    if not keys:
+        return _empty_benchmark_response(
+            owner_label, "mf_holdings", benchmark_key, benchmark_label, start_iso, end_iso,
+            [], [], warnings,
+        )
     nav_series_map: dict[str, pd.Series] = {}
     with ThreadPoolExecutor(max_workers=min(6, len(keys))) as pool:
         futs = {
@@ -1406,4 +1450,73 @@ def compare_mf_vs_benchmark(
         "included_symbols": included_labels,
         "excluded_symbols": [],
         "warnings": list(dict.fromkeys(warnings)),
+    }
+
+
+def compute_cap_distribution(
+    holdings: list[dict[str, Any]],
+    cap_map: dict[str, dict[str, Any]],
+    segment: str = "All Combined",
+) -> dict[str, Any]:
+    """Compute value-weighted Large/Mid/Small/Other cap distribution for Indian holdings."""
+    indian_holdings = [
+        h for h in holdings
+        if str(h.get("region") or "India").strip().lower() != "foreign"
+    ]
+    seg = (segment or "All Combined").strip()
+    if seg == "Equities Only":
+        filtered = [h for h in indian_holdings if h.get("asset_class") == "EQUITY"]
+    elif seg == "Mutual Funds Only":
+        filtered = [h for h in indian_holdings if h.get("asset_class") == "MF"]
+    elif seg in ("All Combined", "All", ""):
+        filtered = list(indian_holdings)
+    else:
+        seg_l = seg.lower()
+        filtered = [
+            h for h in indian_holdings
+            if str(h.get("advisory_source") or "Self").strip().lower() == seg_l
+        ]
+
+    large_val = mid_val = small_val = other_val = unmapped_val = 0.0
+    mapped_count = 0
+    latest_ts = ""
+
+    for h in filtered:
+        val = max(0.0, float(h.get("current_value") or 0.0))
+        is_eq = h.get("asset_class") == "EQUITY"
+        key = str(h.get("symbol") if is_eq else h.get("scheme_name") or "").strip().upper()
+        cap = cap_map.get(key)
+        if not cap:
+            unmapped_val += val
+            continue
+        mapped_count += 1
+        ts = str(cap.get("updated_at") or "")
+        if ts > latest_ts:
+            latest_ts = ts
+        large_val += val * float(cap.get("large_pct") or 0.0) / 100.0
+        mid_val += val * float(cap.get("mid_pct") or 0.0) / 100.0
+        small_val += val * float(cap.get("small_pct") or 0.0) / 100.0
+        other_val += val * float(cap.get("other_pct") or 0.0) / 100.0
+
+    mapped_total = large_val + mid_val + small_val + other_val
+    total_val = mapped_total + unmapped_val
+    denom = mapped_total if mapped_total > 0 else 1.0
+
+    return {
+        "segment": seg,
+        "total_value": round(total_val, 2),
+        "mapped_value": round(mapped_total, 2),
+        "unmapped_value": round(unmapped_val, 2),
+        "large_val": round(large_val, 2),
+        "mid_val": round(mid_val, 2),
+        "small_val": round(small_val, 2),
+        "other_val": round(other_val, 2),
+        "large_pct": round(large_val / denom * 100.0, 2) if mapped_total > 0 else 0.0,
+        "mid_pct": round(mid_val / denom * 100.0, 2) if mapped_total > 0 else 0.0,
+        "small_pct": round(small_val / denom * 100.0, 2) if mapped_total > 0 else 0.0,
+        "other_pct": round(other_val / denom * 100.0, 2) if mapped_total > 0 else 0.0,
+        "coverage_pct": round(mapped_total / total_val * 100.0, 1) if total_val > 0 else 0.0,
+        "mapped_count": mapped_count,
+        "total_count": len(filtered),
+        "last_updated": latest_ts[:10] if latest_ts else "",
     }

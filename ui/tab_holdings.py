@@ -175,14 +175,25 @@ def render_holdings_tab(snapshot: dict[str, Any], selection: SidebarSelection) -
             mask = eq_df.astype(str).apply(lambda col: col.str.lower().str.contains(search_eq, na=False)).any(axis=1)
             eq_df = eq_df[mask]
 
-        base_eq_cols = [
+        eq_show_all = st.toggle(
+            "Show detailed columns (Company, Account, Advisory, Type, Extra)",
+            value=False,
+            key="eq_show_details",
+        )
+        compact_eq_cols = (["owner"] if selection.owner is None else []) + [
+            "symbol", "quantity", "avg_price", "current_price",
+            "invested_value", "current_value", "unrealized_pnl",
+            "unrealized_pnl_pct", "day_change_pct", "weight_pct",
+        ]
+        detailed_eq_cols = [
             "owner", "account_name", "symbol", "company_name", "asset_type", "region",
             "advisory_source", "advisory_notes", "exchange", "quantity",
             "avg_price", "current_price", "invested_value",
             "current_value", "unrealized_pnl", "unrealized_pnl_pct",
-            "day_change_pct", "weight_pct",
+            "day_change_pct", "weight_pct", *eq_extra_cols,
         ]
-        show_eq_cols = [c for c in [*base_eq_cols, *eq_extra_cols] if c in eq_df.columns]
+        target_eq_cols = detailed_eq_cols if eq_show_all else compact_eq_cols
+        show_eq_cols = [c for c in target_eq_cols if c in eq_df.columns]
         st.dataframe(
             eq_df[show_eq_cols],
             width="stretch",
@@ -234,14 +245,25 @@ def render_holdings_tab(snapshot: dict[str, Any], selection: SidebarSelection) -
             },
             skip_extra_keys={"constituents", "constituents_source", "constituents_confidence"},
         )
-        base_mf_cols = [
+        mf_show_all = st.toggle(
+            "Show detailed columns (Folio, AMFI Code, Account, Advisory, Extra)",
+            value=False,
+            key="mf_show_details",
+        )
+        compact_mf_cols = (["owner"] if selection.owner is None else []) + [
+            "scheme_name", "quantity", "avg_price", "current_price",
+            "invested_value", "current_value", "unrealized_pnl",
+            "unrealized_pnl_pct", "weight_pct",
+        ]
+        detailed_mf_cols = [
             "owner", "account_name", "scheme_name", "folio_number", "amfi_code",
             "region", "advisory_source", "advisory_notes",
             "quantity", "avg_price", "current_price", "invested_value",
             "current_value", "unrealized_pnl", "unrealized_pnl_pct",
-            "weight_pct", "nav_date",
+            "weight_pct", "nav_date", *mf_extra_cols,
         ]
-        show_mf_cols = [c for c in [*base_mf_cols, *mf_extra_cols] if c in mf_df.columns]
+        target_mf_cols = detailed_mf_cols if mf_show_all else compact_mf_cols
+        show_mf_cols = [c for c in target_mf_cols if c in mf_df.columns]
         st.dataframe(
             mf_df[show_mf_cols],
             width="stretch",
@@ -331,12 +353,21 @@ def render_holdings_tab(snapshot: dict[str, Any], selection: SidebarSelection) -
     if sort_desc and "trade_date" in tx_df.columns:
         tx_df = tx_df.sort_values(by=["trade_date", "id"], ascending=[False, False])
 
-    base_tx_cols = [
+    tx_show_all = st.toggle(
+        "Show detailed columns (Account, ISIN, Fees, Source, Notes)",
+        value=False,
+        key="tx_show_details",
+    )
+    compact_tx_cols = ["trade_date"] + (["owner"] if selection.owner is None else []) + [
+        "symbol", "side", "quantity", "price", "amount",
+    ]
+    detailed_tx_cols = [
         "trade_date", "owner", "account_name", "symbol", "isin", "exchange",
         "side", "quantity", "price", "amount", "fees", "source",
-        "advisory_source", "advisory_notes",
+        "advisory_source", "advisory_notes", *tx_extra_cols,
     ]
-    show_tx_cols = [c for c in [*base_tx_cols, *tx_extra_cols] if c in tx_df.columns]
+    target_tx_cols = detailed_tx_cols if tx_show_all else compact_tx_cols
+    show_tx_cols = [c for c in target_tx_cols if c in tx_df.columns]
     st.caption(f"Showing {len(tx_df)} of {len(txs)} transactions")
     st.dataframe(
         tx_df[show_tx_cols],
