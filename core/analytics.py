@@ -1468,31 +1468,32 @@ def compute_cap_distribution(
     cap_map: dict[str, dict[str, Any]],
     segment: str = "All Combined",
 ) -> dict[str, Any]:
-    """Compute value-weighted Large/Mid/Small/Other cap distribution for Indian holdings."""
-    indian_holdings = [
-        h for h in holdings
-        if str(h.get("region") or "India").strip().lower() != "foreign"
-    ]
+    """Compute value-weighted Large/Mid/Small/Cash/Foreign cap distribution."""
     seg = (segment or "All Combined").strip()
     if seg == "Equities Only":
-        filtered = [h for h in indian_holdings if h.get("asset_class") == "EQUITY"]
+        filtered = [h for h in holdings if h.get("asset_class") == "EQUITY"]
     elif seg == "Mutual Funds Only":
-        filtered = [h for h in indian_holdings if h.get("asset_class") == "MF"]
+        filtered = [h for h in holdings if h.get("asset_class") == "MF"]
     elif seg in ("All Combined", "All", ""):
-        filtered = list(indian_holdings)
+        filtered = list(holdings)
     else:
         seg_l = seg.lower()
         filtered = [
-            h for h in indian_holdings
+            h for h in holdings
             if str(h.get("advisory_source") or "Self").strip().lower() == seg_l
         ]
 
-    large_val = mid_val = small_val = other_val = unmapped_val = 0.0
+    large_val = mid_val = small_val = cash_val = foreign_val = unmapped_val = 0.0
     mapped_count = 0
     latest_ts = ""
 
     for h in filtered:
         val = max(0.0, float(h.get("current_value") or 0.0))
+        region = str(h.get("region") or "India").strip().lower()
+        if region == "foreign":
+            foreign_val += val
+            mapped_count += 1
+            continue
         is_eq = h.get("asset_class") == "EQUITY"
         key = str(h.get("symbol") if is_eq else h.get("scheme_name") or "").strip().upper()
         cap = cap_map.get(key)
@@ -1506,11 +1507,12 @@ def compute_cap_distribution(
         large_val += val * float(cap.get("large_pct") or 0.0) / 100.0
         mid_val += val * float(cap.get("mid_pct") or 0.0) / 100.0
         small_val += val * float(cap.get("small_pct") or 0.0) / 100.0
-        other_val += val * float(cap.get("other_pct") or 0.0) / 100.0
+        cash_val += val * float(cap.get("other_pct") or 0.0) / 100.0
 
-    mapped_total = large_val + mid_val + small_val + other_val
+    mapped_total = large_val + mid_val + small_val + cash_val + foreign_val
     total_val = mapped_total + unmapped_val
     denom = mapped_total if mapped_total > 0 else 1.0
+    cash_pct = round(cash_val / denom * 100.0, 2) if mapped_total > 0 else 0.0
 
     return {
         "segment": seg,
@@ -1520,11 +1522,15 @@ def compute_cap_distribution(
         "large_val": round(large_val, 2),
         "mid_val": round(mid_val, 2),
         "small_val": round(small_val, 2),
-        "other_val": round(other_val, 2),
+        "cash_val": round(cash_val, 2),
+        "other_val": round(cash_val, 2),
+        "foreign_val": round(foreign_val, 2),
         "large_pct": round(large_val / denom * 100.0, 2) if mapped_total > 0 else 0.0,
         "mid_pct": round(mid_val / denom * 100.0, 2) if mapped_total > 0 else 0.0,
         "small_pct": round(small_val / denom * 100.0, 2) if mapped_total > 0 else 0.0,
-        "other_pct": round(other_val / denom * 100.0, 2) if mapped_total > 0 else 0.0,
+        "cash_pct": cash_pct,
+        "other_pct": cash_pct,
+        "foreign_pct": round(foreign_val / denom * 100.0, 2) if mapped_total > 0 else 0.0,
         "coverage_pct": round(mapped_total / total_val * 100.0, 1) if total_val > 0 else 0.0,
         "mapped_count": mapped_count,
         "total_count": len(filtered),

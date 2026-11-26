@@ -455,12 +455,12 @@ def render_overview_tab(snapshot: dict[str, Any], selection: SidebarSelection) -
         cap_dist = compute_cap_distribution(holdings, cap_map, segment=cap_segment)
         if cap_dist["mapped_count"] == 0:
             st.info(
-                "No cached Large/Mid/Small Cap split yet. Click **Refresh Cap Split** to fetch approximate weights "
-                "from Gemini once (saved locally for instant loading)."
+                "No cached Large/Mid/Small/Cash/Foreign split yet. Click **Refresh Cap Split** to fetch approximate "
+                "weights from Gemini once (saved locally for instant loading)."
             )
         else:
             cap_tiles_html = (
-                '<div class="tech-grid" style="margin-bottom:0.85rem;">'
+                '<div class="tech-grid" style="grid-template-columns:repeat(5,minmax(0,1fr));margin-bottom:0.65rem;">'
                 '<div class="tech-tile">'
                 '<div class="tech-tile-label">Large Cap</div>'
                 f'<div class="tech-tile-val">{cap_dist["large_pct"]:.1f}%</div>'
@@ -477,13 +477,22 @@ def render_overview_tab(snapshot: dict[str, Any], selection: SidebarSelection) -
                 f'<div class="tech-tile-sub">{html.escape(format_inr_compact(cap_dist["small_val"]))}</div>'
                 '</div>'
                 '<div class="tech-tile">'
-                '<div class="tech-tile-label">Other / Coverage</div>'
-                f'<div class="tech-tile-val">{cap_dist["other_pct"]:.1f}%</div>'
-                f'<div class="tech-tile-sub">Mapped: {cap_dist["mapped_count"]}/{cap_dist["total_count"]} ({cap_dist["coverage_pct"]:.0f}%) · {html.escape(cap_dist["last_updated"])}</div>'
+                '<div class="tech-tile-label">Cash</div>'
+                f'<div class="tech-tile-val">{cap_dist["cash_pct"]:.1f}%</div>'
+                f'<div class="tech-tile-sub">{html.escape(format_inr_compact(cap_dist["cash_val"]))}</div>'
+                '</div>'
+                '<div class="tech-tile">'
+                '<div class="tech-tile-label">Foreign</div>'
+                f'<div class="tech-tile-val">{cap_dist["foreign_pct"]:.1f}%</div>'
+                f'<div class="tech-tile-sub">{html.escape(format_inr_compact(cap_dist["foreign_val"]))}</div>'
                 '</div>'
                 '</div>'
             )
             st.markdown(cap_tiles_html, unsafe_allow_html=True)
+            st.caption(
+                f"Mapped: {cap_dist['mapped_count']}/{cap_dist['total_count']} ({cap_dist['coverage_pct']:.0f}%)"
+                + (f" · Last refreshed: {cap_dist['last_updated']}" if cap_dist["last_updated"] else "")
+            )
 
             cap_chart_df = pd.DataFrame(
                 [
@@ -492,7 +501,8 @@ def render_overview_tab(snapshot: dict[str, Any], selection: SidebarSelection) -
                         ("Large Cap", cap_dist["large_val"], cap_dist["large_pct"]),
                         ("Mid Cap", cap_dist["mid_val"], cap_dist["mid_pct"]),
                         ("Small Cap", cap_dist["small_val"], cap_dist["small_pct"]),
-                        ("Other / Debt", cap_dist["other_val"], cap_dist["other_pct"]),
+                        ("Cash", cap_dist["cash_val"], cap_dist["cash_pct"]),
+                        ("Foreign", cap_dist["foreign_val"], cap_dist["foreign_pct"]),
                     ]
                     if v > 0
                 ]
@@ -505,10 +515,10 @@ def render_overview_tab(snapshot: dict[str, Any], selection: SidebarSelection) -
                     orientation="h",
                     text=cap_chart_df.apply(lambda r: f"{r['Share']:.1f}% ({format_inr_compact(r['Value'])})", axis=1),
                     color="Bucket",
-                    color_discrete_sequence=COLOR_PALETTE[:4],
+                    color_discrete_sequence=COLOR_PALETTE[:5],
                 )
                 fig_cap.update_traces(textposition="outside", hovertemplate="%{y}: %{x:.1f}%<extra></extra>")
-                style_plotly_fig(fig_cap, title=f"Cap Split — {cap_segment}", height=240)
+                style_plotly_fig(fig_cap, title=f"Cap Split — {cap_segment}", height=260)
                 fig_cap.update_layout(showlegend=False, hovermode="closest", yaxis_title="", xaxis_title="Weight %", xaxis_range=[0, 115])
                 st.plotly_chart(fig_cap, width="stretch")
 

@@ -505,6 +505,7 @@ def test_cap_distribution_and_gemini_refresh(tmp_path: Path):
         {"asset_class": "EQUITY", "symbol": "RELIANCE", "company_name": "Reliance Industries", "region": "India", "advisory_source": "RC Capital", "current_value": 60000.0},
         {"asset_class": "EQUITY", "symbol": "SMALLCO", "company_name": "Small Cap Co", "region": "India", "advisory_source": "Fintrekk Capital", "current_value": 40000.0},
         {"asset_class": "MF", "scheme_name": "Flexi Cap Fund", "region": "India", "advisory_source": "Self", "current_value": 100000.0},
+        {"asset_class": "EQUITY", "symbol": "LIQUIDETF", "company_name": "Liquid ETF", "region": "India", "advisory_source": "Self", "current_value": 100000.0},
         {"asset_class": "EQUITY", "symbol": "MON100", "company_name": "MOMF NASDAQ 100 ETF", "region": "Foreign", "advisory_source": "Self", "current_value": 500000.0},
         {"asset_class": "MF", "scheme_name": "Parag Parikh IFSC NASDAQ 100 FoF", "region": "Foreign", "advisory_source": "Self", "current_value": 200000.0},
     ]
@@ -513,6 +514,7 @@ def test_cap_distribution_and_gemini_refresh(tmp_path: Path):
         "RELIANCE": {"large": 100, "mid": 0, "small": 0, "other": 0},
         "SMALLCO": {"large": 0, "mid": 0, "small": 100, "other": 0},
         "FLEXI CAP FUND": {"large": 60, "mid": 30, "small": 10, "other": 0},
+        "LIQUIDETF": {"large": 0, "mid": 0, "small": 0, "other": 100},
     }
 
     class FakeModels:
@@ -530,20 +532,33 @@ def test_cap_distribution_and_gemini_refresh(tmp_path: Path):
             db_path=db_path,
         )
 
-    assert res["saved"] == 3
+    assert res["saved"] == 4
     cap_map = query_cap_allocations(db_path=db_path)
-    assert len(cap_map) == 3
+    assert len(cap_map) == 4
 
     all_dist = compute_cap_distribution(holdings, cap_map, segment="All Combined")
-    # Large = 60k + 60k = 120k (60%), Mid = 30k (15%), Small = 40k + 10k = 50k (25%)
-    assert all_dist["large_pct"] == pytest.approx(60.0)
-    assert all_dist["mid_pct"] == pytest.approx(15.0)
-    assert all_dist["small_pct"] == pytest.approx(25.0)
+    # Total = 1,000,000: Large = 120k (12%), Mid = 30k (3%), Small = 50k (5%), Cash = 100k (10%), Foreign = 700k (70%)
+    assert all_dist["large_pct"] == pytest.approx(12.0)
+    assert all_dist["mid_pct"] == pytest.approx(3.0)
+    assert all_dist["small_pct"] == pytest.approx(5.0)
+    assert all_dist["cash_pct"] == pytest.approx(10.0)
+    assert all_dist["foreign_pct"] == pytest.approx(70.0)
     assert all_dist["coverage_pct"] == pytest.approx(100.0)
+    assert all_dist["mapped_count"] == 6
 
     eq_dist = compute_cap_distribution(holdings, cap_map, segment="Equities Only")
-    assert eq_dist["large_pct"] == pytest.approx(60.0)
-    assert eq_dist["small_pct"] == pytest.approx(40.0)
+    # Equity Total = 700,000: RELIANCE 60k Large, SMALLCO 40k Small, LIQUIDETF 100k Cash, MON100 500k Foreign
+    assert eq_dist["large_pct"] == pytest.approx(60000 / 700000 * 100, abs=0.05)
+    assert eq_dist["small_pct"] == pytest.approx(40000 / 700000 * 100, abs=0.05)
+    assert eq_dist["cash_pct"] == pytest.approx(100000 / 700000 * 100, abs=0.05)
+    assert eq_dist["foreign_pct"] == pytest.approx(500000 / 700000 * 100, abs=0.05)
+
+    mf_dist = compute_cap_distribution(holdings, cap_map, segment="Mutual Funds Only")
+    # MF Total = 300,000: Flexi (60k L, 30k M, 10k S), PPFAS GIFT 200k Foreign
+    assert mf_dist["large_pct"] == pytest.approx(20.0)
+    assert mf_dist["mid_pct"] == pytest.approx(10.0)
+    assert mf_dist["small_pct"] == pytest.approx(3.33, abs=0.05)
+    assert mf_dist["foreign_pct"] == pytest.approx(66.67, abs=0.05)
 
     rc_dist = compute_cap_distribution(holdings, cap_map, segment="RC Capital")
     assert rc_dist["large_pct"] == pytest.approx(100.0)
@@ -655,3 +670,68 @@ def test_single_flight_warmup_ttl_failure_and_keys(tmp_path: Path, monkeypatch: 
     with ds._BG_LOCK:
         assert fail_key not in ds._BG_INFLIGHT_FUTURES
     assert ds._run_or_join_single_flight(fail_key, lambda: {"recovered": True}, wait=True) == {"recovered": True}
+
+
+def test_gemini_stream_midstream_error_and_context_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify stream_portfolio_gemini never duplicates output after partial stream and context errors surface loudly."""
+    from types import SimpleNamespace
+    import core.gemini_chat as gc
+
+    # 1. Context build failure must raise loudly instead of sending '{}' silently
+    monkeypatch.setattr(gc, "build_local_portfolio_context", lambda **_kw: (_ for _ in ()).throw(ValueError("db corrupt")))
+    with pytest.raises(RuntimeError, match="Failed to load local portfolio context"):
+        list(gc.stream_portfolio_gemini(prompt="hi", api_key="fake-key", db_path=tmp_path / "x.db"))
+
+    # Restore valid context and inspect prompt factsheet guardrail
+    monkeypatch.setattr(gc, "build_local_portfolio_context", lambda **_kw: '{"holdings":[]}')
+    sys_inst, _ = gc._prepare_gemini_request(
+        prompt="overlap?",
+        history=None,
+        active_owner="All",
+        db_path=tmp_path / "x.db",
+        precomputed_snapshot=None,
+    )
+    assert "factsheet constituents are NOT in RAW_PORTFOLIO_DATA" in sys_inst
+
+    # 2. Pre-stream 503 should fall back cleanly to next model
+    class FallbackModels:
+        def __init__(self):
+            self.calls = []
+
+        def generate_content_stream(self, model, contents, config):
+            self.calls.append(model)
+            if len(self.calls) == 1:
+                raise RuntimeError("503 UNAVAILABLE")
+            yield SimpleNamespace(text="clean-fallback")
+
+    class PreFailClient:
+        def __init__(self, api_key: str):
+            self.models = FallbackModels()
+
+    monkeypatch.setattr("google.genai.Client", PreFailClient)
+    out = list(gc.stream_portfolio_gemini(prompt="hi", api_key="fake-key", model="gemini-3.6-flash", db_path=tmp_path / "x.db"))
+    assert out == ["clean-fallback"]
+
+    # 3. Mid-stream 503 after yielding a chunk must NOT restart on fallback model
+    class MidFailModels:
+        def __init__(self):
+            self.calls = []
+
+        def generate_content_stream(self, model, contents, config):
+            self.calls.append(model)
+            yield SimpleNamespace(text="partial-")
+            raise RuntimeError("503 UNAVAILABLE mid-stream")
+
+    mid_models = MidFailModels()
+
+    class MidFailClient:
+        def __init__(self, api_key: str):
+            self.models = mid_models
+
+    monkeypatch.setattr("google.genai.Client", MidFailClient)
+    streamed: list[str] = []
+    with pytest.raises(RuntimeError, match="mid-stream"):
+        for chunk in gc.stream_portfolio_gemini(prompt="hi", api_key="fake-key", model="gemini-3.6-flash", db_path=tmp_path / "x.db"):
+            streamed.append(chunk)
+    assert streamed == ["partial-"]
+    assert len(mid_models.calls) == 1

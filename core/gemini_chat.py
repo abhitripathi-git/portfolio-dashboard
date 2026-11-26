@@ -136,17 +136,20 @@ def _prepare_gemini_request(
             db_path=db_path,
             precomputed_snapshot=precomputed_snapshot,
         )
-    except Exception:
-        raw_ctx = "{}"
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load local portfolio context: {exc}") from exc
 
     system_instruction = (
         "You are a fast, precise Indian stock & mutual fund portfolio analyst for Abhishek and Tanu. "
         f"Active dashboard scope: {owner_hint}. Today's date: {date.today().isoformat()}.\n\n"
         "CLOUD-FIRST ANALYSIS RULE:\n"
-        "- The JSON below is the complete raw dataset from SQLite + live prices (holdings, mutual funds, "
+        "- The JSON below is the raw portfolio dataset from SQLite + live prices (holdings, mutual funds, "
         "alternative assets, and transactions).\n"
-        "- Compute all comparisons (by advisory source, India vs Foreign, top/bottom performers, "
-        "MF overlap from scheme factsheets, and trade history) directly in the cloud from this raw data.\n"
+        "- Compute comparisons (by advisory source, India vs Foreign, top/bottom performers, "
+        "and trade history) directly from this raw data.\n"
+        "- Underlying mutual fund scheme factsheet constituents are NOT in RAW_PORTFOLIO_DATA; if asked "
+        "for exact stock-level MF overlap or sector percentages, clearly note that live scheme holdings are "
+        "unavailable rather than guessing exact weights.\n"
         "- Format INR amounts cleanly (e.g., ₹12.45 L or ₹1,24,500) and mention any warnings transparently.\n\n"
         f"RAW_PORTFOLIO_DATA={raw_ctx}"
     )
@@ -583,16 +586,18 @@ def stream_portfolio_gemini(
 
     last_exc: Exception | None = None
     for idx, cand in enumerate(order):
+        yielded_any = False
         try:
             for chunk in client.models.generate_content_stream(model=cand, contents=contents, config=config):
                 txt = getattr(chunk, "text", None)
                 if txt:
+                    yielded_any = True
                     yield txt
             return
         except Exception as exc:
             msg = str(exc)
             is_transient = ("503" in msg or "429" in msg or "UNAVAILABLE" in msg or "RESOURCE_EXHAUSTED" in msg)
-            if is_transient and idx < len(order) - 1:
+            if not yielded_any and is_transient and idx < len(order) - 1:
                 last_exc = exc
                 continue
             raise

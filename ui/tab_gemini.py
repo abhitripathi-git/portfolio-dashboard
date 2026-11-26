@@ -132,8 +132,6 @@ def render_gemini_tab(
         st.session_state["gemini_chat_history"] = []
     if "gemini_model_choice" not in st.session_state:
         st.session_state["gemini_model_choice"] = AVAILABLE_GEMINI_MODELS[0]
-    if st.session_state.pop("clear_gemini_draft", False):
-        st.session_state["gemini_draft_prompt"] = ""
 
     current_key = st.session_state["gemini_api_key"]
     active_model = st.session_state["gemini_model_choice"]
@@ -196,6 +194,26 @@ def render_gemini_tab(
     if not st.session_state["gemini_api_key"]:
         st.info("Open **Settings & Configuration** above and enter your `GEMINI_API_KEY` to start.")
         return
+
+    # Render conversation + composer inside a fragment so Clear/Send reruns stay scoped to this tab.
+    _render_gemini_chat_fragment(
+        selection=selection,
+        snapshot=snapshot,
+        model_choice=model_choice,
+        enable_live_tools=enable_live_tools,
+    )
+
+
+@st.fragment
+def _render_gemini_chat_fragment(
+    selection: SidebarSelection,
+    snapshot: dict[str, Any] | None,
+    model_choice: str,
+    enable_live_tools: bool,
+) -> None:
+    """Render conversation history and composer without triggering a full-app rerun on send."""
+    if st.session_state.pop("clear_gemini_draft", False):
+        st.session_state["gemini_draft_prompt"] = ""
 
     # Render conversation history
     for msg in st.session_state["gemini_chat_history"]:
@@ -285,6 +303,6 @@ def render_gemini_tab(
                     {"role": "assistant", "content": reply, "tools_used": tools_used}
                 )
                 st.session_state["clear_gemini_draft"] = True
-                st.rerun()
+                st.rerun(scope="fragment")
             except Exception as exc:
                 st.error(f"Gemini request failed: {exc}")
