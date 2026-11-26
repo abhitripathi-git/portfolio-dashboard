@@ -399,8 +399,6 @@ def render_benchmark_tab(selection: SidebarSelection) -> None:
                 },
             ]
             st.dataframe(pd.DataFrame(comp_rows), width="stretch", hide_index=True)
-            if seg_res is not None and seg_res.get("included_symbols"):
-                st.caption(f"{seg_label} symbols ({len(seg_res.get('included_symbols', []))}): {', '.join(seg_res.get('included_symbols', []))}")
             if res.get("excluded_symbols"):
                 st.caption(f"Excluded symbols: {', '.join(res['excluded_symbols'])}")
 
