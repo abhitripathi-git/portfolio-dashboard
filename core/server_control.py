@@ -155,7 +155,10 @@ def sync_backup_to_cloud(db_path: Path, backup_dir: Path | None = None) -> dict[
     pkg_script = BASE_DIR / "scripts" / "package_backup.sh"
     zip_dest: Path | None = None
     if pkg_script.exists():
-        subprocess.run(["bash", str(pkg_script)], cwd=str(BASE_DIR), check=False, capture_output=True)
+        try:
+            subprocess.run(["bash", str(pkg_script)], cwd=str(BASE_DIR), check=False, capture_output=True, timeout=45)
+        except subprocess.TimeoutExpired:
+            pass
         zips = sorted(BASE_DIR.parent.glob("portfolio-dashboard-backup-*.zip"))
         if zips:
             latest_zip = zips[-1]
@@ -204,13 +207,17 @@ def sync_code_to_github(repo_dir: Path | None = None) -> dict[str, object]:
             return {"ok": False, "message": f"git commit failed: {cmt_res.stderr.strip() or cmt_res.stdout.strip()}"}
         committed = True
 
-    push_res = subprocess.run(
-        ["git", "push", "-u", "origin", "HEAD:main"],
-        cwd=str(root),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        push_res = subprocess.run(
+            ["git", "push", "-u", "origin", "HEAD:main"],
+            cwd=str(root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "committed": committed, "message": "git push timed out after 45s."}
     if push_res.returncode != 0:
         err = (push_res.stderr or push_res.stdout or "").strip()
         return {"ok": False, "committed": committed, "message": f"git push failed: {err}"}

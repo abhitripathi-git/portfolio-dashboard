@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import date, timedelta
+import logging
 from pathlib import Path
 import threading
+import time
 from typing import Any
 
 import streamlit as st
@@ -23,10 +26,14 @@ from core.db import (
 )
 from core.market_data import clear_market_cache
 
+logger = logging.getLogger(__name__)
 
+_BG_TTL_SECONDS = 300.0
 _BG_LOCK = threading.Lock()
-_BG_BENCH_RESULTS: dict[tuple[Any, ...], dict[str, Any]] = {}
-_BG_WARM_INFLIGHT: set[tuple[Any, ...]] = set()
+_BG_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="bench-warm")
+_BG_BENCH_RESULTS: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+_BG_INFLIGHT_FUTURES: dict[tuple[Any, ...], Future[dict[str, Any]]] = {}
+DEFAULT_WARMUP_BENCHMARK = "NIFTY_MIDCAP_150"
 
 
 def get_data_version() -> int:
@@ -39,54 +46,92 @@ def invalidate_all_caches(clear_live_market: bool = False) -> None:
         clear_market_cache()
     with _BG_LOCK:
         _BG_BENCH_RESULTS.clear()
-        _BG_WARM_INFLIGHT.clear()
+        _BG_INFLIGHT_FUTURES.clear()
     st.session_state["data_version"] = get_data_version() + 1
     st.cache_data.clear()
 
 
-def trigger_background_warmup(owner: str | None, db_path: Path, version: int) -> None:
-    """Warm default 1Y equity + MF benchmark series on a daemon thread without blocking Overview."""
-    db_str = str(db_path)
-    warm_key = (owner, db_str, version)
+def _run_or_join_single_flight(
+    bg_key: tuple[Any, ...],
+    fn: Any,
+    wait: bool,
+) -> dict[str, Any] | None:
+    """Share an in-flight Future or return fresh (<300s TTL) result; never duplicate concurrent work."""
+    now = time.monotonic()
     with _BG_LOCK:
-        if warm_key in _BG_WARM_INFLIGHT:
-            return
-        _BG_WARM_INFLIGHT.add(warm_key)
+        cached = _BG_BENCH_RESULTS.get(bg_key)
+        if cached is not None:
+            ts, payload = cached
+            if (now - ts) < _BG_TTL_SECONDS:
+                return payload
+            _BG_BENCH_RESULTS.pop(bg_key, None)
 
-    today = date.today()
+        fut = _BG_INFLIGHT_FUTURES.get(bg_key)
+        if fut is None:
+            def _wrapped() -> dict[str, Any]:
+                try:
+                    res = fn()
+                    with _BG_LOCK:
+                        _BG_BENCH_RESULTS[bg_key] = (time.monotonic(), res)
+                    return res
+                except Exception as exc:
+                    logger.warning("Benchmark task failed for %s: %s", bg_key[:3], exc)
+                    raise
+                finally:
+                    with _BG_LOCK:
+                        _BG_INFLIGHT_FUTURES.pop(bg_key, None)
+
+            fut = _BG_EXECUTOR.submit(_wrapped)
+            _BG_INFLIGHT_FUTURES[bg_key] = fut
+
+    if not wait:
+        return None
+    return fut.result(timeout=35)
+
+
+def default_warmup_specs(
+    owner: str | None,
+    db_path: Path,
+    version: int,
+    ref_date: date | None = None,
+) -> list[tuple[tuple[Any, ...], Any]]:
+    """Canonical default 1Y keys shared between background warmup and Benchmarks tab."""
+    today = ref_date or date.today()
     start_1y = (today - timedelta(days=365)).isoformat()
     end_iso = today.isoformat()
+    db_str = str(db_path)
 
-    def _worker() -> None:
-        try:
-            path = Path(db_str)
-            if not path.exists():
-                return
-            k_eq = ("eq", owner, "NIFTY_MIDCAP_150", start_1y, end_iso, (), True, db_str, version, None, None)
-            k_in = ("eq", owner, "NIFTY_MIDCAP_150", start_1y, end_iso, (), True, db_str, version, "India", None)
-            k_mf = ("mf", owner, "NIFTY_50", start_1y, end_iso, "ALL", db_str, version)
-            res_eq = compare_portfolio_vs_benchmark(
-                owner=owner, benchmark_key="NIFTY_MIDCAP_150", start_date=start_1y, end_date=end_iso,
-                adjust_for_splits=True, db_path=path,
-            )
-            with _BG_LOCK:
-                _BG_BENCH_RESULTS[k_eq] = res_eq
-            res_in = compare_portfolio_vs_benchmark(
-                owner=owner, benchmark_key="NIFTY_MIDCAP_150", start_date=start_1y, end_date=end_iso,
-                adjust_for_splits=True, region="India", db_path=path,
-            )
-            with _BG_LOCK:
-                _BG_BENCH_RESULTS[k_in] = res_in
-            res_mf = compare_mf_vs_benchmark(
-                owner=owner, benchmark_key="NIFTY_50", start_date=start_1y, end_date=end_iso,
-                scheme_filter="ALL", db_path=path,
-            )
-            with _BG_LOCK:
-                _BG_BENCH_RESULTS[k_mf] = res_mf
-        except Exception:
-            pass
+    return [
+        (
+            ("eq", owner, DEFAULT_WARMUP_BENCHMARK, start_1y, end_iso, (), True, db_str, version, None, None),
+            lambda: compare_portfolio_vs_benchmark(
+                owner=owner, benchmark_key=DEFAULT_WARMUP_BENCHMARK,
+                start_date=start_1y, end_date=end_iso, adjust_for_splits=True, db_path=db_path,
+            ),
+        ),
+        (
+            ("eq", owner, DEFAULT_WARMUP_BENCHMARK, start_1y, end_iso, (), True, db_str, version, "India", None),
+            lambda: compare_portfolio_vs_benchmark(
+                owner=owner, benchmark_key=DEFAULT_WARMUP_BENCHMARK,
+                start_date=start_1y, end_date=end_iso, adjust_for_splits=True, region="India", db_path=db_path,
+            ),
+        ),
+        (
+            ("mf", owner, DEFAULT_WARMUP_BENCHMARK, start_1y, end_iso, "ALL", db_str, version),
+            lambda: compare_mf_vs_benchmark(
+                owner=owner, benchmark_key=DEFAULT_WARMUP_BENCHMARK,
+                start_date=start_1y, end_date=end_iso, scheme_filter="ALL", db_path=db_path,
+            ),
+        ),
+    ]
 
-    threading.Thread(target=_worker, daemon=True, name="bench-warmup").start()
+
+def trigger_background_warmup(owner: str | None, db_path: Path, version: int) -> None:
+    """Launch single-flight non-blocking warmup for default 1Y equity & MF benchmarks."""
+    if not db_path.exists():
+        return
+    for bg_key, fn in default_warmup_specs(owner=owner, db_path=db_path, version=version):
+        _run_or_join_single_flight(bg_key, fn, wait=False)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -101,6 +146,7 @@ def cached_snapshot(
         owner=owner,
         include_mf=include_mf,
         db_path=Path(db_path_str),
+        include_xirr=False,
     )
 
 
@@ -119,20 +165,23 @@ def cached_benchmark_comparison(
 ) -> dict[str, Any]:
     _ = version
     bg_key = ("eq", owner, benchmark_key, start_date, end_date, exclude_symbols, adjust_for_splits, db_path_str, version, region, advisory_source)
-    with _BG_LOCK:
-        if bg_key in _BG_BENCH_RESULTS:
-            return _BG_BENCH_RESULTS[bg_key]
-    return compare_portfolio_vs_benchmark(
-        owner=owner,
-        benchmark_key=benchmark_key,
-        start_date=start_date,
-        end_date=end_date,
-        exclude_symbols=list(exclude_symbols),
-        adjust_for_splits=adjust_for_splits,
-        region=region,
-        advisory_source=advisory_source,
-        db_path=Path(db_path_str),
+    res = _run_or_join_single_flight(
+        bg_key,
+        lambda: compare_portfolio_vs_benchmark(
+            owner=owner,
+            benchmark_key=benchmark_key,
+            start_date=start_date,
+            end_date=end_date,
+            exclude_symbols=list(exclude_symbols),
+            adjust_for_splits=adjust_for_splits,
+            region=region,
+            advisory_source=advisory_source,
+            db_path=Path(db_path_str),
+        ),
+        wait=True,
     )
+    assert res is not None
+    return res
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -147,17 +196,20 @@ def cached_mf_benchmark_comparison(
 ) -> dict[str, Any]:
     _ = version
     bg_key = ("mf", owner, benchmark_key, start_date, end_date, scheme_filter, db_path_str, version)
-    with _BG_LOCK:
-        if bg_key in _BG_BENCH_RESULTS:
-            return _BG_BENCH_RESULTS[bg_key]
-    return compare_mf_vs_benchmark(
-        owner=owner,
-        benchmark_key=benchmark_key,
-        start_date=start_date,
-        end_date=end_date,
-        scheme_filter=scheme_filter,
-        db_path=Path(db_path_str),
+    res = _run_or_join_single_flight(
+        bg_key,
+        lambda: compare_mf_vs_benchmark(
+            owner=owner,
+            benchmark_key=benchmark_key,
+            start_date=start_date,
+            end_date=end_date,
+            scheme_filter=scheme_filter,
+            db_path=Path(db_path_str),
+        ),
+        wait=True,
     )
+    assert res is not None
+    return res
 
 
 @st.cache_data(ttl=300, show_spinner=False)

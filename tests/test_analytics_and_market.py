@@ -602,3 +602,56 @@ def test_mf_usd_conversion_and_usd_xirr(tmp_path: Path, monkeypatch: pytest.Monk
     assert mf["unrealized_pnl_pct"] == pytest.approx(10.0)
     # 1 year hold from 2025-11-26 to 2026-11-26 (+10% gain in both USD & INR) -> XIRR ~ 10%
     assert snap["totals"]["xirr"] == pytest.approx(0.10, abs=0.01)
+
+
+def test_single_flight_warmup_ttl_failure_and_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify warmup single-flight sharing, TTL expiration, failure cleanup, and MF key alignment."""
+    import threading
+    import time
+    import ui.data_service as ds
+
+    db_path = tmp_path / "warm.db"
+    db_path.write_bytes(b"")  # exists check
+
+    with ds._BG_LOCK:
+        ds._BG_BENCH_RESULTS.clear()
+        ds._BG_INFLIGHT_FUTURES.clear()
+
+    # 1. Verify Equity & MF warmup share NIFTY_MIDCAP_150 (matching tab_benchmark defaults)
+    specs = ds.default_warmup_specs(owner="Abhishek", db_path=db_path, version=1)
+    assert [s[0][0] for s in specs] == ["eq", "eq", "mf"]
+    assert all(s[0][2] == "NIFTY_MIDCAP_150" for s in specs)
+
+    # 2. Verify concurrent callers join the single in-flight Future instead of duplicating work
+    call_count = 0
+    started = threading.Event()
+    proceed = threading.Event()
+
+    def slow_compute():
+        nonlocal call_count
+        call_count += 1
+        started.set()
+        proceed.wait(timeout=2.0)
+        return {"summary": {"ok": True}, "calls": call_count}
+
+    key = ("eq", "Abhishek", "NIFTY_MIDCAP_150", "2025-11-26", "2026-11-26", (), True, str(db_path), 1, None, None)
+    ds._run_or_join_single_flight(key, slow_compute, wait=False)
+    assert started.wait(timeout=1.0)
+    proceed.set()
+    res = ds._run_or_join_single_flight(key, slow_compute, wait=True)
+    assert call_count == 1
+    assert res == {"summary": {"ok": True}, "calls": 1}
+
+    # 3. Verify TTL expiration clears stale entries cleanly
+    with ds._BG_LOCK:
+        ds._BG_BENCH_RESULTS[key] = (time.monotonic() - (ds._BG_TTL_SECONDS + 5), {"stale": True})
+    res_fresh = ds._run_or_join_single_flight(key, lambda: {"stale": False}, wait=True)
+    assert res_fresh == {"stale": False}
+
+    # 4. Verify failures remove key from _BG_INFLIGHT_FUTURES so retries succeed
+    fail_key = ("mf", "Abhishek", "NIFTY_MIDCAP_150", "2025-11-26", "2026-11-26", "ALL", str(db_path), 1)
+    with pytest.raises(RuntimeError):
+        ds._run_or_join_single_flight(fail_key, lambda: (_ for _ in ()).throw(RuntimeError("boom")), wait=True)
+    with ds._BG_LOCK:
+        assert fail_key not in ds._BG_INFLIGHT_FUTURES
+    assert ds._run_or_join_single_flight(fail_key, lambda: {"recovered": True}, wait=True) == {"recovered": True}

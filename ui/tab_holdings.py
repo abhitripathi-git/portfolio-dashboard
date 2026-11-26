@@ -325,10 +325,15 @@ def render_holdings_tab(snapshot: dict[str, Any], selection: SidebarSelection) -
         ).strip().lower()
     with fc2:
         all_sides = sorted({str(t.get("side", "")).upper() for t in txs if t.get("side")})
+        if "tx_side_filter" not in st.session_state:
+            st.session_state["tx_side_filter"] = all_sides
+        else:
+            st.session_state["tx_side_filter"] = [
+                s for s in st.session_state["tx_side_filter"] if s in all_sides
+            ] or all_sides
         side_filter = st.multiselect(
             "Side",
             options=all_sides,
-            default=all_sides,
             key="tx_side_filter",
         )
     with fc3:

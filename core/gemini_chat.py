@@ -145,7 +145,7 @@ def _prepare_gemini_request(
         "CLOUD-FIRST ANALYSIS RULE:\n"
         "- The JSON below is the complete raw dataset from SQLite + live prices (holdings, mutual funds, "
         "alternative assets, and transactions).\n"
-        "- Compute all comparisons (RC Capital vs Fintrekk Capital, India vs Foreign, top/bottom performers, "
+        "- Compute all comparisons (by advisory source, India vs Foreign, top/bottom performers, "
         "MF overlap from scheme factsheets, and trade history) directly in the cloud from this raw data.\n"
         "- Format INR amounts cleanly (e.g., ₹12.45 L or ₹1,24,500) and mention any warnings transparently.\n\n"
         f"RAW_PORTFOLIO_DATA={raw_ctx}"
@@ -401,7 +401,7 @@ def build_portfolio_tools(db_path: Path | str = DB_PATH) -> tuple[list[Any], dic
             end_date: Optional YYYY-MM-DD end date.
             exclude_symbols: Optional list of scrip names to exclude before comparing.
             region: Optional region filter ("India" or "Foreign").
-            advisory_source: Optional advisory filter (e.g. "Self", "RC Capital", "Fintrekk Capital").
+            advisory_source: Optional advisory filter (e.g. "Self", "Advisor One").
         """
         bench_key = _normalize_benchmark_key(benchmark)
         res = compare_portfolio_vs_benchmark(

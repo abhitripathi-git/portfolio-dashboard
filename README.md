@@ -91,18 +91,18 @@ Available benchmark keys: `NIFTY_50`, `NIFTY_MIDCAP_150`, `NIFTY_MIDCAP_50`, `NI
 - `rebuild_holdings_from_transactions()` starts from those baselines and only applies transactions with `trade_date > max(baseline.as_of_date)`, ensuring imported/pre-tradebook holdings (e.g., `MON100`) are never wiped out when new monthly trades are added.
 - `compare_portfolio_vs_benchmark()` unwinds transactions backward from `holding_baselines` so historical benchmark replays include all baseline positions accurately.
 
-### Region (`India` / `Foreign`) & Advisory (`Self` / `RC Capital` / `Fintrekk Capital`) Tracking
+### Region (`India` / `Foreign`) & Advisory Tracking
 - Every holding, baseline, MF holding, and transaction carries `region`, `advisory_source`, and `advisory_notes`.
-- **Benchmark & Simulator** always plots the blue **Overall Combined** line + Benchmark, and offers a **Compare Segment** dropdown (`Region: India`, `Region: Foreign`, `Advisory: Self`, `Advisory: RC Capital`, `Advisory: Fintrekk Capital`, etc.) to overlay one segment at a time.
+- **Benchmarks** always plots the primary **Overall Combined** line + Benchmark, and offers a **Compare Segment** dropdown (`Region: India`, `Region: Foreign`, `Advisory: Self`, etc.) plus a Mutual Fund dropdown to overlay individual funds or segments.
 
-### One-Click Server Restart
-- The sidebar includes **Refresh Prices** (clears in-memory cache) and **Restart App** (`core/server_control.py`), which restarts the Streamlit server and auto-reloads the browser tab without needing Terminal.
+### One-Click Server Restart & Online Sync
+- The sidebar includes **Refresh** (clears in-memory cache), **Restart** (`core/server_control.py`), and **Sync Online** (snapshots `portfolio.db` to Google Drive and pushes tracked code updates to GitHub).
 
 ---
 
-## 4. Backing Up to Google Drive (Before Formatting / Uninstalling Tools)
+## 4. Backing Up Locally & to Google Drive
 
-Run the packager script to generate a clean, `.venv`-free folder and `.zip` archive (contains all source code, docs, `pyproject.toml`, `uv.lock`, `.env`, and `data/portfolio.db`):
+Run the packager script to generate a clean, `.venv`-free folder and `.zip` archive (contains source code, docs, `pyproject.toml`, `uv.lock`, and `data/portfolio.db`—explicitly excluding `.env` secrets and `.git/`):
 
 ```bash
 ./scripts/package_backup.sh

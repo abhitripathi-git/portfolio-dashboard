@@ -20,6 +20,40 @@ from ui.data_service import get_data_version, get_enriched_snapshot, trigger_bac
 from ui.formatters import inject_custom_css
 
 
+_PERSISTENT_WIDGET_KEYS = (
+    "overview_cap_segment",
+    "bench_select",
+    "bench_preset",
+    "bench_segment_select",
+    "bench_mf_select",
+    "bench_exclusions",
+    "bench_adj_splits",
+    "eq_holdings_search",
+    "eq_show_details",
+    "mf_show_details",
+    "tx_ledger_search",
+    "tx_side_filter",
+    "tx_sort_desc",
+    "tx_show_details",
+    "movers_metric_radio",
+    "movers_scope_radio",
+)
+
+
+def _sync_tab_widget_state(scope_sig: tuple[object, ...]) -> None:
+    """Keep tab filter/selection state intact when conditionally rendering only the active tab."""
+    if st.session_state.get("_widget_scope_sig") != scope_sig:
+        st.session_state["_widget_scope_sig"] = scope_sig
+        st.session_state["_saved_tab_widgets"] = {}
+        return
+    saved = st.session_state.setdefault("_saved_tab_widgets", {})
+    for key in _PERSISTENT_WIDGET_KEYS:
+        if key in st.session_state:
+            saved[key] = st.session_state[key]
+        elif key in saved:
+            st.session_state[key] = saved[key]
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Family Portfolio Dashboard",
@@ -32,6 +66,7 @@ def main() -> None:
     inject_custom_css()
 
     selection = render_sidebar()
+    _sync_tab_widget_state((selection.owner, selection.account_id))
 
     with st.spinner("Loading portfolio snapshot..."):
         snapshot = get_enriched_snapshot(

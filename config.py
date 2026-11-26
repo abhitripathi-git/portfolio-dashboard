@@ -1,10 +1,15 @@
 """Configuration and extensible mappings for the portfolio dashboard."""
 
+import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
-DB_PATH = DATA_DIR / "portfolio.db"
+DB_PATH = (
+    Path(os.environ["PORTFOLIO_DB_PATH"]).expanduser()
+    if os.environ.get("PORTFOLIO_DB_PATH")
+    else (DATA_DIR / "portfolio.db")
+)
 
 # Default family owners (modifiable—new owners can be added via UI or DB anytime)
 DEFAULT_OWNERS = ["Abhishek", "Tanu"]

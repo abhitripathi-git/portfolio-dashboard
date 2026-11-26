@@ -479,3 +479,25 @@ def test_gemini_chat_tool_loop_and_direct_tools(seeded_mcp_db: Path, mock_market
         )
     assert "RC Capital: ₹12.5 L" in streamed
 
+
+def test_readonly_query_timeout_and_portfolio_db_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seeded_mcp_db: Path):
+    """Verify run_readonly_query aborts runaway recursive CTEs and config honors PORTFOLIO_DB_PATH."""
+    import importlib
+    import config
+    from core.db import run_readonly_query
+
+    # Runaway recursive CTE must terminate via SQLite progress handler timeout
+    with pytest.raises(sqlite3.OperationalError):
+        run_readonly_query(
+            "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt) SELECT MAX(x) FROM cnt",
+            db_path=seeded_mcp_db,
+            timeout_seconds=0.05,
+        )
+
+    custom_db = tmp_path / "env_override.db"
+    monkeypatch.setenv("PORTFOLIO_DB_PATH", str(custom_db))
+    reloaded = importlib.reload(config)
+    assert reloaded.DB_PATH == custom_db
+    monkeypatch.delenv("PORTFOLIO_DB_PATH", raising=False)
+    importlib.reload(config)
+

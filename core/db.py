@@ -929,9 +929,15 @@ def rebuild_holdings_from_transactions(
             )
     target_path = Path(db_path) if db_path else DB_PATH
     if target_path.exists() and target_path.resolve() == DB_PATH.resolve():
-        bak_path = DATA_DIR / "portfolio.pre_rebuild.bak"
+        bak3 = DATA_DIR / "portfolio.pre_rebuild.3.bak"
+        bak2 = DATA_DIR / "portfolio.pre_rebuild.2.bak"
+        bak1 = DATA_DIR / "portfolio.pre_rebuild.1.bak"
+        if bak2.exists():
+            bak2.replace(bak3)
+        if bak1.exists():
+            bak1.replace(bak2)
         src_conn = sqlite3.connect(str(target_path), timeout=15.0)
-        dst_conn = sqlite3.connect(str(bak_path), timeout=15.0)
+        dst_conn = sqlite3.connect(str(bak1), timeout=15.0)
         try:
             src_conn.backup(dst_conn)
         finally:
@@ -1127,7 +1133,12 @@ def _readonly_sqlite_authorizer(
     trigger: str | None,
 ) -> int:
     _ = (db_name, trigger)
-    if action in (sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION):
+    if action in (
+        sqlite3.SQLITE_SELECT,
+        sqlite3.SQLITE_READ,
+        sqlite3.SQLITE_FUNCTION,
+        getattr(sqlite3, "SQLITE_RECURSIVE", 33),
+    ):
         return sqlite3.SQLITE_OK
     if action == sqlite3.SQLITE_PRAGMA:
         pname = (arg1 or "").strip().lower()
@@ -1140,8 +1151,11 @@ def run_readonly_query(
     sql: str,
     db_path: Path | str | None = None,
     max_rows: int = 500,
+    timeout_seconds: float = 4.5,
 ) -> list[dict[str, Any]]:
-    """Execute a read-only SELECT/WITH/schema PRAGMA query enforced by URI mode=ro and SQLite authorizer."""
+    """Execute a read-only query enforced by URI mode=ro, authorizer, and VM progress timeout."""
+    import time
+
     stripped = sql.strip().lstrip("(")
     upper = stripped.upper()
     if not (upper.startswith("SELECT") or upper.startswith("WITH") or upper.startswith("PRAGMA")):
@@ -1151,10 +1165,12 @@ def run_readonly_query(
     if not path.exists():
         return []
 
+    deadline = time.monotonic() + max(0.2, float(timeout_seconds))
     conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False, timeout=5.0)
     conn.row_factory = sqlite3.Row
     try:
         conn.set_authorizer(_readonly_sqlite_authorizer)
+        conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10000)
         cur = conn.execute(sql)
         rows = cur.fetchmany(max_rows)
         return [_row_to_dict(r) for r in rows]

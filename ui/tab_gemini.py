@@ -215,7 +215,7 @@ def render_gemini_tab(
         label_visibility="collapsed",
         placeholder=(
             "Ask anything in plain English or click Speak to dictate...\n"
-            "• Compare RC Capital vs Fintrekk Capital returns\n"
+            "• Compare returns by advisory source\n"
             "• Check mutual fund overlap across our active schemes\n"
             "• How much is our India vs Foreign allocation?"
         ),

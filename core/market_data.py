@@ -9,6 +9,7 @@ import logging
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -436,8 +437,17 @@ def fetch_latest_prices(
         return results
 
     sym_to_yahoo: dict[str, str] = {}
-    for sym in uncached:
-        sym_to_yahoo[sym] = resolve_yahoo_symbol(sym, db_path=db_path)
+    if len(uncached) > 1:
+        with ThreadPoolExecutor(max_workers=min(6, len(uncached))) as pool:
+            futs = {sym: pool.submit(resolve_yahoo_symbol, sym, db_path) for sym in uncached}
+            for sym, fut in futs.items():
+                try:
+                    sym_to_yahoo[sym] = fut.result(timeout=12)
+                except Exception:
+                    sym_to_yahoo[sym] = f"{sym}.NS"
+    else:
+        for sym in uncached:
+            sym_to_yahoo[sym] = resolve_yahoo_symbol(sym, db_path=db_path)
 
     unique_yahoo = sorted(set(sym_to_yahoo.values()))
     batch_df: pd.DataFrame | None = None

@@ -228,6 +228,7 @@ def get_portfolio_snapshot(
     exclude_symbols: list[str] | None = None,
     include_mf: bool = True,
     db_path: Path | str | None = None,
+    include_xirr: bool = True,
 ) -> dict[str, Any]:
     """Build a live portfolio snapshot for an owner (or combined) with on-demand pricing."""
     excluded_list = sorted({s.strip().upper() for s in (exclude_symbols or []) if s and s.strip()})
@@ -274,9 +275,15 @@ def get_portfolio_snapshot(
                 for key in unique_mf_keys
             }
             if eq_fut is not None:
-                latest_prices = eq_fut.result()
+                try:
+                    latest_prices = eq_fut.result(timeout=25)
+                except Exception:
+                    warnings.append("Live equity price fetch timed out; falling back cleanly.")
             for key, fut in mf_futs.items():
-                mf_nav_cache[key] = fut.result()
+                try:
+                    mf_nav_cache[key] = fut.result(timeout=20)
+                except Exception:
+                    mf_nav_cache[key] = None
 
     equity_holdings: list[dict[str, Any]] = []
     equity_invested = 0.0
@@ -479,16 +486,19 @@ def get_portfolio_snapshot(
     mf_holdings_out.sort(key=lambda x: x["current_value"], reverse=True)
 
     today = date.today()
-    overall_xirr, equity_xirr, xirr_notes = _compute_portfolio_xirr_from_transactions(
-        owner=owner,
-        excluded=excluded_set,
-        include_mf=include_mf,
-        equity_current_value=equity_current_value,
-        mf_current_value=mf_current_value,
-        as_of=today,
-        db_path=db_path,
-    )
-    warnings.extend(xirr_notes)
+    overall_xirr: float | None = None
+    equity_xirr: float | None = None
+    if include_xirr:
+        overall_xirr, equity_xirr, xirr_notes = _compute_portfolio_xirr_from_transactions(
+            owner=owner,
+            excluded=excluded_set,
+            include_mf=include_mf,
+            equity_current_value=equity_current_value,
+            mf_current_value=mf_current_value,
+            as_of=today,
+            db_path=db_path,
+        )
+        warnings.extend(xirr_notes)
 
     return {
         "owner": owner.strip().title() if owner and owner.strip().lower() not in ("all", "combined", "both", "*") else "Combined",
@@ -1321,7 +1331,7 @@ def compare_mf_vs_benchmark(
         }
         for k, fut in futs.items():
             try:
-                s = fut.result()
+                s = fut.result(timeout=20)
                 if s is not None and not s.empty:
                     nav_series_map[k] = s
                 else:
