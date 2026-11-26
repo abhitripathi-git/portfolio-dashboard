@@ -15,12 +15,16 @@ mkdir -p "$OUT_DIR"
 
 rsync -a \
     --exclude '.venv/' \
+    --exclude '.git/' \
+    --exclude '.env' \
+    --exclude '.env.*' \
     --exclude '.agents/' \
     --exclude '__pycache__/' \
     --exclude '.pytest_cache/' \
     --exclude '*.pyc' \
     --exclude 'data/streamlit.log' \
     --exclude 'data/demo_portfolio.db*' \
+    --exclude 'data/*.bak' \
     --exclude '.DS_Store' \
     "$PROJECT_ROOT/" "$OUT_DIR/"
 

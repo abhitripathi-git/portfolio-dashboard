@@ -273,6 +273,30 @@ html, body, [class*="css"] {
     color: #3B6FD8;
     box-shadow: 0 1px 4px rgba(15, 23, 42, 0.06);
 }
+/* Segmented Pill Top Navigation Bar */
+[data-testid="stSegmentedControl"] {
+    width: 100%;
+    margin-bottom: 0.9rem;
+}
+[data-testid="stSegmentedControl"] > div {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    padding: 0.32rem;
+    background: rgba(148, 163, 184, 0.07);
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 13px;
+}
+[data-testid="stSegmentedControl"] button {
+    flex: 1 1 0;
+    min-width: max-content;
+    justify-content: center;
+    border-radius: 9px !important;
+    font-weight: 600 !important;
+    font-size: 0.87rem !important;
+    padding: 0.5rem 0.95rem !important;
+}
 /* Rounded DataFrames, Expanders, Inputs, Buttons, ChatInput & Sidebar */
 [data-testid="stDataFrame"] {
     border: 1px solid rgba(148, 163, 184, 0.16);

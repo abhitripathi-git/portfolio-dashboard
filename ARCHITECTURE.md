@@ -64,9 +64,10 @@ portfolio-dashboard/
 3. **`holdings`**: `(id, account_id, symbol, isin, company_name, exchange, asset_type, quantity, avg_price, invested_value, as_of_date, source, region, advisory_source, advisory_notes, extra_data, updated_at)` — `UNIQUE(account_id, symbol, asset_type)`.
 4. **`holding_baselines`**: Same columns as `holdings`. Stores reconciled depository snapshots (e.g., CDSL Beneficiary + Pledge as of `2026-11-25`).
 5. **`mf_holdings`**: `(id, account_id, folio_number, scheme_name, amfi_code, isin, units, avg_nav, invested_value, as_of_date, source, region, advisory_source, advisory_notes, extra_data, updated_at)` — `UNIQUE(account_id, folio_number, scheme_name)`.
-6. **`other_assets`**: `(id, owner, name, category, invested_value, current_value, as_of_date, notes, extra_data, updated_at)` — `UNIQUE(owner, name)`. Stores static long-term wealth (Retirement/PPF & Real Estate) editable inline on Overview and summed into Total Net Worth without diluting daily equity/MF analytics.
-7. **`symbol_aliases`**: `(raw_symbol PRIMARY KEY, yahoo_symbol, isin, company_name, sector, updated_at)`. Caches broker-name-to-Yahoo-ticker mappings.
-8. **`import_logs`**: Audit log of every CSV/XLSX/PDF/manual import and holding rebuild.
+6. **`other_assets`**: `(id, owner, name, category, invested_value, current_value, as_of_date, notes, extra_data, updated_at)` — `UNIQUE(owner, name)`. Stores static long-term wealth (Retirement/PPF & Real Estate) editable inline on Alt Assets and summed into Total Net Worth without diluting daily equity/MF analytics.
+7. **`cap_allocations`**: `(asset_key PRIMARY KEY, asset_class, large_pct, mid_pct, small_pct, other_pct, updated_at)`. Caches point-in-time SEBI market-cap weights fetched from Gemini for Indian equities & mutual funds.
+8. **`symbol_aliases`**: `(raw_symbol PRIMARY KEY, yahoo_symbol, isin, company_name, sector, updated_at)`. Caches broker-name-to-Yahoo-ticker mappings.
+9. **`import_logs`**: Audit log of every CSV/XLSX/PDF/manual import and holding rebuild.
 
 ### Baseline & Rebuild Invariant (`rebuild_holdings_from_transactions`)
 - If `holding_baselines` has rows for `account_id` (with `max_baseline_date`), `rebuild_holdings_from_transactions()` initializes positions from `holding_baselines` and **only replays transactions with `trade_date > max_baseline_date`**.
@@ -95,27 +96,17 @@ portfolio-dashboard/
 
 ---
 
-## 5. Hybrid Local + Gemini Cloud Architecture (`core/gemini_chat.py`)
+## 5. Cloud-First Streaming Gemini Chat (`core/gemini_chat.py`)
 
-- `build_local_portfolio_context()` computes a compact JSON digest (~13.8 KB, ~1.2 ms on M5) from the pre-loaded UI `snapshot` (totals, `by_advisory`, `by_region`, `top_gainers`, `top_losers`, `tx_summary`, compact `holdings` without `extra_data` bloat).
-- Embedded into `system_instruction` so summary, P&L, advisor, region, and top/bottom questions resolve in **1 Gemini Cloud call** with zero round trips.
-- When deep tools are requested (`tool_compare_against_benchmark`, `tool_check_mf_stock_overlap`, `tool_get_transactions_history`, `tool_run_readonly_sql`, etc.), multiple calls in a turn execute concurrently via `ThreadPoolExecutor`.
-
----
-
-## 6. Current Live Portfolio State (`data/portfolio.db`, as of `2026-11-25`)
-
-- **Account 1 (`Abhishek - 5paisa`):**
-  - **Equities & ETFs (`53`):** Synced 100% to CDSL Depository Statement (`25/11/2026`, Beneficiary + Pledge combined) in both `holding_baselines` and `holdings`, with all 53 average buy prices populated.
-  - **Mutual Funds (`5`):** Added from CDSL PDF with AMFI codes (`153738`, `149219`, `153722`, `154377`, `153272`). *Note: `avg_nav = 0.0` pending user-supplied cost basis or CAMS CAS upload.*
-  - **Region (`region`):** `MON100` (`INF247L01AP3`) and `ICICI Prudential NASDAQ 100 Index Fund` (`INF109KC1U50`) are tagged `'Foreign'`; all other 56 positions are `'India'`.
-  - **Advisory (`advisory_source`):** `RC Capital` (`16` holdings), `Fintrekk Capital` (`31` holdings, including `INTL. GEM. INSTITUTE` based on earliest Sep 12 2026 call), `Self` (`11` positions: `6` equities/ETFs + `5` MFs).
-- **Transactions (`207` rows):** `2025-04-25` to `2026-11-08` from 5paisa tradebook exports.
+- `build_local_portfolio_context()` serializes raw holdings, MFs, alternative assets, and compact transactions straight from the pre-loaded UI `snapshot` + SQLite (`<10 ms`).
+- `stream_portfolio_gemini()` runs single-shot streaming (`tools=None`) directly to Gemini Cloud so summaries, advisor splits, factsheet MF overlap, and history answers stream in 1 turn.
+- Optional deep mode (`enable_tools=True`) exposes 7 read-only tools via `ThreadPoolExecutor`.
 
 ---
 
-## 7. Security & Safety Guardrails
+## 6. Security & Safety Guardrails
 
-- `run_readonly_query()` (`core/db.py`) enforces `PRAGMA query_only = ON` and rejects non-`SELECT`/`WITH`/`PRAGMA` queries or mutating keywords (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`, `REPLACE`, `ATTACH`).
-- `.env` is excluded by `.gitignore` and never hardcoded in source files.
-- Demo exploration uses an isolated `data/demo_portfolio.db` so `data/portfolio.db` is untouched.
+- `.streamlit/config.toml` binds Streamlit to `127.0.0.1` only (`headless = true`).
+- `run_readonly_query()` (`core/db.py`) opens SQLite with `?mode=ro`, enforces a strict `set_authorizer()` whitelist (`SELECT`/`READ`/`FUNCTION`/schema `PRAGMA table_info` only), and caps rows.
+- `.env`, `data/*.db*`, and `data/*.bak` are excluded by `.gitignore` and `scripts/package_backup.sh`.
+- `scripts/package_backup.sh` creates portable offline backups; **Sync Online** pushes only already-tracked Git files (`git add -u`) and backs up `portfolio.db` locally to Google Drive.

@@ -5,30 +5,41 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
-from config import DB_PATH, DEFAULT_OWNERS
+from config import DATA_DIR, DB_PATH, DEFAULT_OWNERS
+
+_INITIALIZED_DB_KEYS: set[tuple[str, bool]] = set()
+_ALLOWED_MIGRATION_TABLES = frozenset({"transactions", "holdings", "mf_holdings", "holding_baselines"})
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-_INITIALIZED_DB_KEYS: set[tuple[str, bool]] = set()
-
-
-def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
-    """Return a SQLite connection with row_factory, WAL mode, and foreign keys enabled."""
+@contextmanager
+def get_connection(db_path: Path | str | None = None) -> Iterator[sqlite3.Connection]:
+    """Yield a SQLite connection with WAL mode & FK enabled, committing and closing cleanly on exit."""
     path = Path(db_path) if db_path else DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), check_same_thread=False)
+    conn = sqlite3.connect(str(path), check_same_thread=False, timeout=15.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
-    return conn
+    try:
+        conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA journal_mode = WAL;")
+        conn.execute("PRAGMA synchronous = NORMAL;")
+        yield conn
+        if conn.in_transaction:
+            conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db(db_path: Path | str | None = None, seed_default_owners: bool = True) -> Path:
@@ -186,6 +197,8 @@ def init_db(db_path: Path | str | None = None, seed_default_owners: bool = True)
             """
         )
         for tbl in ("transactions", "holdings", "mf_holdings", "holding_baselines"):
+            if tbl not in _ALLOWED_MIGRATION_TABLES:
+                raise ValueError(f"Disallowed migration table: {tbl}")
             existing_cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({tbl})").fetchall()}
             if "region" not in existing_cols:
                 conn.execute(f"ALTER TABLE {tbl} ADD COLUMN region TEXT NOT NULL DEFAULT 'India'")
@@ -914,6 +927,16 @@ def rebuild_holdings_from_transactions(
                     "extra_data": pos.get("extra_data", {}),
                 }
             )
+    target_path = Path(db_path) if db_path else DB_PATH
+    if target_path.exists() and target_path.resolve() == DB_PATH.resolve():
+        bak_path = DATA_DIR / "portfolio.pre_rebuild.bak"
+        src_conn = sqlite3.connect(str(target_path), timeout=15.0)
+        dst_conn = sqlite3.connect(str(bak_path), timeout=15.0)
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+            src_conn.close()
     return upsert_holdings(
         account_id=account_id,
         holdings=computed,
@@ -1096,16 +1119,44 @@ def upsert_cap_allocations(rows: list[dict[str, Any]], db_path: Path | str | Non
     return saved
 
 
-def run_readonly_query(sql: str, db_path: Path | str | None = None) -> list[dict[str, Any]]:
-    """Execute a safe read-only SELECT/WITH/PRAGMA query for ad-hoc LLM analysis."""
+def _readonly_sqlite_authorizer(
+    action: int,
+    arg1: str | None,
+    arg2: str | None,
+    db_name: str | None,
+    trigger: str | None,
+) -> int:
+    _ = (db_name, trigger)
+    if action in (sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION):
+        return sqlite3.SQLITE_OK
+    if action == sqlite3.SQLITE_PRAGMA:
+        pname = (arg1 or "").strip().lower()
+        if pname in {"table_info", "table_list", "index_list", "foreign_key_list"}:
+            return sqlite3.SQLITE_OK
+    return sqlite3.SQLITE_DENY
+
+
+def run_readonly_query(
+    sql: str,
+    db_path: Path | str | None = None,
+    max_rows: int = 500,
+) -> list[dict[str, Any]]:
+    """Execute a read-only SELECT/WITH/schema PRAGMA query enforced by URI mode=ro and SQLite authorizer."""
     stripped = sql.strip().lstrip("(")
     upper = stripped.upper()
     if not (upper.startswith("SELECT") or upper.startswith("WITH") or upper.startswith("PRAGMA")):
-        raise ValueError("Only read-only SELECT, WITH, or PRAGMA queries are allowed.")
-    forbidden = ("INSERT ", "UPDATE ", "DELETE ", "DROP ", "ALTER ", "CREATE ", "REPLACE ", "ATTACH ")
-    if any(tok in upper for tok in forbidden):
-        raise ValueError("Mutating SQL statements are not allowed.")
-    with get_connection(db_path) as conn:
-        conn.execute("PRAGMA query_only = ON;")
-        rows = conn.execute(sql).fetchall()
+        raise ValueError("Only read-only SELECT, WITH, or PRAGMA schema queries are allowed.")
+
+    path = (Path(db_path) if db_path else DB_PATH).resolve()
+    if not path.exists():
+        return []
+
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.set_authorizer(_readonly_sqlite_authorizer)
+        cur = conn.execute(sql)
+        rows = cur.fetchmany(max_rows)
         return [_row_to_dict(r) for r in rows]
+    finally:
+        conn.close()

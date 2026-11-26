@@ -24,7 +24,6 @@ from ui.formatters import (
     format_inr,
     format_inr_compact,
     format_pct,
-    format_xirr,
     style_plotly_fig,
 )
 from ui.sidebar import SidebarSelection
@@ -125,12 +124,12 @@ def render_overview_tab(snapshot: dict[str, Any], selection: SidebarSelection) -
     pnl_pct = float(totals.get("pnl_pct", 0.0))
     day_val = float(totals.get("day_change", 0.0))
     day_pct = float(totals.get("day_change_pct", 0.0))
-    xirr_val = totals.get("xirr")
-    eq_xirr = totals.get("equity_xirr")
+    eq_cur = float(totals.get("equity_current_value", 0.0))
+    mf_cur = float(totals.get("mf_current_value", 0.0))
+    eq_share = (eq_cur / cur_total * 100.0) if cur_total > 0 else 0.0
 
     pnl_tone = "pos" if pnl_val > 0 else ("neg" if pnl_val < 0 else "neu")
     day_tone = "pos" if day_val > 0 else ("neg" if day_val < 0 else "neu")
-    xirr_note = f"Eq: {format_xirr(eq_xirr)}" if eq_xirr is not None else "Needs full cashflows"
 
     kpi_html = (
         '<div class="kpi-grid">'
@@ -159,9 +158,9 @@ def render_overview_tab(snapshot: dict[str, Any], selection: SidebarSelection) -
             day_tone,
         )
         + _kpi_card_html(
-            "Portfolio XIRR",
-            format_xirr(xirr_val),
-            xirr_note,
+            "Equity vs MFs",
+            f"{eq_share:.1f}% Eq",
+            f"Eq {format_inr_compact(eq_cur)} · MF {format_inr_compact(mf_cur)}",
             "neu",
         )
         + "</div>"

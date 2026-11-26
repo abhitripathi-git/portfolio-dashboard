@@ -379,6 +379,18 @@ def test_mcp_run_readonly_sql_allows_select_and_blocks_mutations(seeded_mcp_db: 
     _assert_json_serializable(pragma_res)
     assert any(col["name"] == "extra_data" for col in pragma_res["rows"])
 
+    # String literals containing SQL keywords in LIKE must NOT be false-positive blocked
+    like_res = mcp_server.run_readonly_sql("SELECT symbol FROM holdings WHERE symbol LIKE '%UPDATE %'")
+    _assert_json_serializable(like_res)
+    assert like_res["row_count"] == 0
+
+    # Connection context manager must actually close underlying sqlite3 connections
+    from core.db import get_connection
+    with get_connection(seeded_mcp_db) as closed_chk:
+        closed_chk.execute("SELECT 1").fetchone()
+    with pytest.raises(sqlite3.ProgrammingError):
+        closed_chk.execute("SELECT 1")
+
     bad_queries = [
         "DROP TABLE accounts",
         "DELETE FROM transactions WHERE id = 1",
@@ -387,6 +399,7 @@ def test_mcp_run_readonly_sql_allows_select_and_blocks_mutations(seeded_mcp_db: 
         "ALTER TABLE accounts ADD COLUMN foo TEXT",
         "CREATE TABLE evil(x INT)",
         "ATTACH DATABASE ':memory:' AS extra_db",
+        "PRAGMA query_only = OFF",
         "SELECT 1; DROP TABLE accounts;",
     ]
     for bad_sql in bad_queries:

@@ -182,7 +182,8 @@ def sync_code_to_github(repo_dir: Path | None = None) -> dict[str, object]:
     if not (root / ".git").exists():
         return {"ok": False, "message": "Git repository not initialized in project root."}
 
-    add_res = subprocess.run(["git", "add", "-A"], cwd=str(root), env=env, capture_output=True, text=True)
+    # Stage updates to already-tracked files only (never auto-adds stray untracked exports)
+    add_res = subprocess.run(["git", "add", "-u"], cwd=str(root), env=env, capture_output=True, text=True)
     if add_res.returncode != 0:
         return {"ok": False, "message": f"git add failed: {add_res.stderr.strip()}"}
 

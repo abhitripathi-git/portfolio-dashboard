@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from pathlib import Path
+import threading
 from typing import Any
 
 import streamlit as st
@@ -13,14 +15,18 @@ from core.analytics import (
     get_portfolio_snapshot,
 )
 from core.db import (
+    get_connection,
     get_import_logs,
-    get_symbol_aliases,
-    list_accounts,
     query_holdings,
     query_mf_holdings,
     query_transactions,
 )
 from core.market_data import clear_market_cache
+
+
+_BG_LOCK = threading.Lock()
+_BG_BENCH_RESULTS: dict[tuple[Any, ...], dict[str, Any]] = {}
+_BG_WARM_INFLIGHT: set[tuple[Any, ...]] = set()
 
 
 def get_data_version() -> int:
@@ -31,8 +37,56 @@ def invalidate_all_caches(clear_live_market: bool = False) -> None:
     """Invalidate Streamlit caches (and optionally the in-memory market TTL cache)."""
     if clear_live_market:
         clear_market_cache()
+    with _BG_LOCK:
+        _BG_BENCH_RESULTS.clear()
+        _BG_WARM_INFLIGHT.clear()
     st.session_state["data_version"] = get_data_version() + 1
     st.cache_data.clear()
+
+
+def trigger_background_warmup(owner: str | None, db_path: Path, version: int) -> None:
+    """Warm default 1Y equity + MF benchmark series on a daemon thread without blocking Overview."""
+    db_str = str(db_path)
+    warm_key = (owner, db_str, version)
+    with _BG_LOCK:
+        if warm_key in _BG_WARM_INFLIGHT:
+            return
+        _BG_WARM_INFLIGHT.add(warm_key)
+
+    today = date.today()
+    start_1y = (today - timedelta(days=365)).isoformat()
+    end_iso = today.isoformat()
+
+    def _worker() -> None:
+        try:
+            path = Path(db_str)
+            if not path.exists():
+                return
+            k_eq = ("eq", owner, "NIFTY_MIDCAP_150", start_1y, end_iso, (), True, db_str, version, None, None)
+            k_in = ("eq", owner, "NIFTY_MIDCAP_150", start_1y, end_iso, (), True, db_str, version, "India", None)
+            k_mf = ("mf", owner, "NIFTY_50", start_1y, end_iso, "ALL", db_str, version)
+            res_eq = compare_portfolio_vs_benchmark(
+                owner=owner, benchmark_key="NIFTY_MIDCAP_150", start_date=start_1y, end_date=end_iso,
+                adjust_for_splits=True, db_path=path,
+            )
+            with _BG_LOCK:
+                _BG_BENCH_RESULTS[k_eq] = res_eq
+            res_in = compare_portfolio_vs_benchmark(
+                owner=owner, benchmark_key="NIFTY_MIDCAP_150", start_date=start_1y, end_date=end_iso,
+                adjust_for_splits=True, region="India", db_path=path,
+            )
+            with _BG_LOCK:
+                _BG_BENCH_RESULTS[k_in] = res_in
+            res_mf = compare_mf_vs_benchmark(
+                owner=owner, benchmark_key="NIFTY_50", start_date=start_1y, end_date=end_iso,
+                scheme_filter="ALL", db_path=path,
+            )
+            with _BG_LOCK:
+                _BG_BENCH_RESULTS[k_mf] = res_mf
+        except Exception:
+            pass
+
+    threading.Thread(target=_worker, daemon=True, name="bench-warmup").start()
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -64,6 +118,10 @@ def cached_benchmark_comparison(
     advisory_source: str | None = None,
 ) -> dict[str, Any]:
     _ = version
+    bg_key = ("eq", owner, benchmark_key, start_date, end_date, exclude_symbols, adjust_for_splits, db_path_str, version, region, advisory_source)
+    with _BG_LOCK:
+        if bg_key in _BG_BENCH_RESULTS:
+            return _BG_BENCH_RESULTS[bg_key]
     return compare_portfolio_vs_benchmark(
         owner=owner,
         benchmark_key=benchmark_key,
@@ -88,6 +146,10 @@ def cached_mf_benchmark_comparison(
     version: int,
 ) -> dict[str, Any]:
     _ = version
+    bg_key = ("mf", owner, benchmark_key, start_date, end_date, scheme_filter, db_path_str, version)
+    with _BG_LOCK:
+        if bg_key in _BG_BENCH_RESULTS:
+            return _BG_BENCH_RESULTS[bg_key]
     return compare_mf_vs_benchmark(
         owner=owner,
         benchmark_key=benchmark_key,
@@ -245,19 +307,35 @@ def get_enriched_snapshot(
 
 
 def load_db_status(db_path: Path) -> dict[str, Any]:
-    """Collect lightweight DB stats for the sidebar status card."""
+    """Collect lightweight DB stats using single SQL COUNT(*) queries."""
     size_bytes = db_path.stat().st_size if db_path.exists() else 0
-    accounts = list_accounts(db_path=db_path)
-    eq_count = len(query_holdings(db_path=db_path))
-    mf_count = len(query_mf_holdings(db_path=db_path))
-    tx_count = len(query_transactions(db_path=db_path))
-    aliases_count = len(get_symbol_aliases(db_path=db_path))
+    accounts_count = eq_count = mf_count = tx_count = aliases_count = 0
+    if db_path.exists():
+        with get_connection(db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM accounts) AS acc_c,
+                    (SELECT COUNT(*) FROM holdings) AS eq_c,
+                    (SELECT COUNT(*) FROM mf_holdings) AS mf_c,
+                    (SELECT COUNT(*) FROM transactions) AS tx_c,
+                    (SELECT COUNT(*) FROM symbol_aliases) AS al_c
+                """
+            ).fetchone()
+            if row:
+                accounts_count, eq_count, mf_count, tx_count, aliases_count = (
+                    int(row["acc_c"]),
+                    int(row["eq_c"]),
+                    int(row["mf_c"]),
+                    int(row["tx_c"]),
+                    int(row["al_c"]),
+                )
     logs = get_import_logs(limit=1, db_path=db_path)
     last_log = logs[0] if logs else None
     return {
         "path": str(db_path),
         "size_bytes": size_bytes,
-        "accounts_count": len(accounts),
+        "accounts_count": accounts_count,
         "eq_count": eq_count,
         "mf_count": mf_count,
         "tx_count": tx_count,

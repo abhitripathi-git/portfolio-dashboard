@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+
 import streamlit as st
 
 from core.db import init_db
@@ -14,7 +16,7 @@ from ui import (
     render_sidebar,
     render_upload_tab,
 )
-from ui.data_service import get_enriched_snapshot
+from ui.data_service import get_data_version, get_enriched_snapshot, trigger_background_warmup
 from ui.formatters import inject_custom_css
 
 
@@ -51,40 +53,52 @@ def main() -> None:
         '<div class="hero-sub">Indian Equities, ETFs &amp; Mutual Funds · On-demand live market analytics</div>'
         '</div>'
         '<div class="hero-badges">'
-        f'<span class="owner-pill">{selection.owner_label}{scope_suffix}</span>'
+        f'<span class="owner-pill">{html.escape(selection.owner_label)}{html.escape(scope_suffix)}</span>'
         f'<span class="live-pill">{eq_cnt} Equities · {mf_cnt} MFs</span>'
         '</div>'
         '</div>'
     )
     st.markdown(hero_html, unsafe_allow_html=True)
 
-    tab_overview, tab_bench, tab_holdings, tab_alt, tab_upload, tab_gemini = st.tabs(
-        [
-            ":material/dashboard: Overview",
-            ":material/monitoring: Benchmarks",
-            ":material/account_balance_wallet: Holdings",
-            ":material/account_balance: Alt Assets",
-            ":material/upload_file: Upload & Data",
-            ":material/auto_awesome: Ask Gemini",
-        ]
+    # Start warming Benchmarks in a background thread so Overview paints immediately
+    trigger_background_warmup(selection.owner, selection.db_path, get_data_version())
+
+    nav_items = [
+        ("overview", ":material/dashboard: Overview"),
+        ("benchmarks", ":material/monitoring: Benchmarks"),
+        ("holdings", ":material/account_balance_wallet: Holdings"),
+        ("alt_assets", ":material/account_balance: Alt Assets"),
+        ("upload", ":material/upload_file: Upload & Data"),
+        ("gemini", ":material/auto_awesome: Ask Gemini"),
+    ]
+    nav_labels = dict(nav_items)
+    nav_keys = [k for k, _ in nav_items]
+    if "active_nav_tab" not in st.session_state or st.session_state["active_nav_tab"] not in nav_labels:
+        st.session_state["active_nav_tab"] = "overview"
+
+    chosen_tab = st.segmented_control(
+        "Navigation",
+        options=nav_keys,
+        format_func=lambda k: nav_labels.get(k, k),
+        default=st.session_state["active_nav_tab"],
+        key="main_nav_control",
+        label_visibility="collapsed",
     )
+    if chosen_tab:
+        st.session_state["active_nav_tab"] = chosen_tab
+    active_tab = st.session_state["active_nav_tab"]
 
-    with tab_overview:
+    if active_tab == "overview":
         render_overview_tab(snapshot, selection)
-
-    with tab_bench:
+    elif active_tab == "benchmarks":
         render_benchmark_tab(selection)
-
-    with tab_holdings:
+    elif active_tab == "holdings":
         render_holdings_tab(snapshot, selection)
-
-    with tab_alt:
+    elif active_tab == "alt_assets":
         render_alt_assets_tab(snapshot, selection)
-
-    with tab_upload:
+    elif active_tab == "upload":
         render_upload_tab(selection)
-
-    with tab_gemini:
+    elif active_tab == "gemini":
         render_gemini_tab(selection, snapshot=snapshot)
 
 

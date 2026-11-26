@@ -1,6 +1,6 @@
-# Personal Portfolio Dashboard & MCP Server (Abhishek & Tanu)
+# Personal Portfolio Dashboard & MCP Server
 
-A portable, local-first Indian equities, ETFs, and mutual funds portfolio tracker built for **Abhishek**, **Tanu**, and **Combined** family views.
+A portable, local-first Indian equities, ETFs, and mutual funds portfolio tracker built for multi-owner **Individual** and **Combined** family views.
 
 - **100% Local SQLite Storage (`data/portfolio.db`)** — holdings, CDSL depository baselines, transactions, mutual fund folios, symbol aliases, and advisory/region tags stay on your Mac.
 - **On-Demand Live Market Data** — stock/ETF prices and index benchmarks come from Yahoo Finance (`yfinance`), and mutual fund NAVs come from AMFI (`mftool`), cached only in memory (never written into SQLite).
