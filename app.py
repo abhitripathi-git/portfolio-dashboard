@@ -27,9 +27,12 @@ _PERSISTENT_WIDGET_KEYS = (
     "bench_preset",
     "bench_segment_select",
     "bench_mf_select",
-    "bench_exclusions",
-    "bench_adj_splits",
+    "bench_exclude_scrips",
+    "bench_adjust_splits",
+    "bench_chart_mode",
     "eq_holdings_search",
+    "eq_region_filter",
+    "eq_advisory_filter",
     "eq_show_details",
     "mf_show_details",
     "movers_metric_radio",
@@ -91,7 +94,8 @@ def main() -> None:
         fresh_parts.append(f"{manual_cnt} manual/SIF")
     if cost_cnt:
         fresh_parts.append(f"{cost_cnt} cost-valued")
-    freshness_str = " · ".join(fresh_parts) + f" · {datetime.now().strftime('%H:%M')}"
+    fetched_at = str(snapshot.get("fetched_at") or datetime.now().strftime("%H:%M"))
+    freshness_str = " · ".join(fresh_parts) + f" · {fetched_at}"
 
     title_text = (
         f"{selection.owner_label}’s Portfolio"

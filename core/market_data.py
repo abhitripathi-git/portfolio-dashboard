@@ -438,13 +438,18 @@ def fetch_latest_prices(
 
     sym_to_yahoo: dict[str, str] = {}
     if len(uncached) > 1:
-        with ThreadPoolExecutor(max_workers=min(6, len(uncached))) as pool:
+        pool = ThreadPoolExecutor(max_workers=min(6, len(uncached)))
+        timed_out = False
+        try:
             futs = {sym: pool.submit(resolve_yahoo_symbol, sym, db_path) for sym in uncached}
             for sym, fut in futs.items():
                 try:
                     sym_to_yahoo[sym] = fut.result(timeout=12)
                 except Exception:
+                    timed_out = True
                     sym_to_yahoo[sym] = f"{sym}.NS"
+        finally:
+            pool.shutdown(wait=not timed_out, cancel_futures=timed_out)
     else:
         for sym in uncached:
             sym_to_yahoo[sym] = resolve_yahoo_symbol(sym, db_path=db_path)

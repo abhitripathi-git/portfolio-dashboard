@@ -165,19 +165,8 @@ def render_benchmark_tab(selection: SidebarSelection) -> None:
     seg_code, seg_label, seg_region, seg_adv = selected_segment
 
     with st.spinner("Computing portfolio replay & fetching benchmark prices..."):
-        res = cached_benchmark_comparison(
-            owner=selection.owner,
-            benchmark_key=bench_key,
-            start_date=start_iso,
-            end_date=end_iso,
-            exclude_symbols=tuple(sorted(excluded_scrips)),
-            adjust_for_splits=adjust_splits,
-            db_path_str=str(db_path),
-            version=get_data_version(),
-        )
-        seg_res: dict[str, Any] | None = None
-        if seg_code != "NONE":
-            seg_res = cached_benchmark_comparison(
+        try:
+            res = cached_benchmark_comparison(
                 owner=selection.owner,
                 benchmark_key=bench_key,
                 start_date=start_iso,
@@ -186,9 +175,24 @@ def render_benchmark_tab(selection: SidebarSelection) -> None:
                 adjust_for_splits=adjust_splits,
                 db_path_str=str(db_path),
                 version=get_data_version(),
-                region=seg_region,
-                advisory_source=seg_adv,
             )
+            seg_res: dict[str, Any] | None = None
+            if seg_code != "NONE":
+                seg_res = cached_benchmark_comparison(
+                    owner=selection.owner,
+                    benchmark_key=bench_key,
+                    start_date=start_iso,
+                    end_date=end_iso,
+                    exclude_symbols=tuple(sorted(excluded_scrips)),
+                    adjust_for_splits=adjust_splits,
+                    db_path_str=str(db_path),
+                    version=get_data_version(),
+                    region=seg_region,
+                    advisory_source=seg_adv,
+                )
+        except Exception as exc:
+            st.warning(f"Benchmark calculation timed out or failed ({exc}). Try again or switch date window.")
+            return
 
     summary: dict[str, Any] = res.get("summary", {})
     ts_rows: list[dict[str, Any]] = res.get("timeseries", [])

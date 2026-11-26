@@ -509,6 +509,7 @@ def get_portfolio_snapshot(
     return {
         "owner": owner.strip().title() if owner and owner.strip().lower() not in ("all", "combined", "both", "*") else "Combined",
         "as_of_date": today.isoformat(),
+        "fetched_at": pd.Timestamp.now().strftime("%H:%M"),
         "totals": {
             "invested": round(total_invested, 2),
             "current_value": round(total_current, 2),
@@ -1349,7 +1350,9 @@ def compare_mf_vs_benchmark(
             [], [], warnings,
         )
     nav_series_map: dict[str, pd.Series] = {}
-    with ThreadPoolExecutor(max_workers=min(6, len(keys))) as pool:
+    pool = ThreadPoolExecutor(max_workers=min(6, len(keys)))
+    timed_out = False
+    try:
         futs = {
             k: pool.submit(fetch_mf_historical_nav, meta_map[k][0], meta_map[k][1], start_iso, end_iso)
             for k in keys
@@ -1362,7 +1365,10 @@ def compare_mf_vs_benchmark(
                 else:
                     warnings.append(f"Historical NAV unavailable for '{meta_map[k][1]}'.")
             except Exception:
+                timed_out = True
                 warnings.append(f"Historical NAV unavailable for '{meta_map[k][1]}'.")
+    finally:
+        pool.shutdown(wait=not timed_out, cancel_futures=timed_out)
 
     if not nav_series_map:
         return _empty_benchmark_response(

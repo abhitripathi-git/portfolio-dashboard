@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 _BG_TTL_SECONDS = 300.0
 _BG_LOCK = threading.Lock()
 _BG_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="bench-warm")
+_FG_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="bench-fg")
 _BG_BENCH_RESULTS: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _BG_INFLIGHT_FUTURES: dict[tuple[Any, ...], Future[dict[str, Any]]] = {}
 DEFAULT_WARMUP_BENCHMARK = "NIFTY_MIDCAP_150"
@@ -81,7 +82,8 @@ def _run_or_join_single_flight(
                     with _BG_LOCK:
                         _BG_INFLIGHT_FUTURES.pop(bg_key, None)
 
-            fut = _BG_EXECUTOR.submit(_wrapped)
+            executor = _FG_EXECUTOR if wait else _BG_EXECUTOR
+            fut = executor.submit(_wrapped)
             _BG_INFLIGHT_FUTURES[bg_key] = fut
 
     if not wait:
