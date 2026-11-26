@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import html
 
 import streamlit as st
@@ -31,10 +32,6 @@ _PERSISTENT_WIDGET_KEYS = (
     "eq_holdings_search",
     "eq_show_details",
     "mf_show_details",
-    "tx_ledger_search",
-    "tx_side_filter",
-    "tx_sort_desc",
-    "tx_show_details",
     "movers_metric_radio",
     "movers_scope_radio",
 )
@@ -78,18 +75,38 @@ def main() -> None:
     totals = snapshot.get("totals", {})
     eq_cnt = totals.get("holdings_count", 0)
     mf_cnt = totals.get("mf_count", 0)
-    scope_suffix = (
-        f" · {selection.account_label}" if selection.account_id is not None else ""
+    all_h = snapshot.get("holdings", [])
+    manual_cnt = sum(
+        1 for h in all_h
+        if isinstance(h.get("extra_data"), dict) and h["extra_data"].get("manual_ltp") is not None
     )
+    cost_cnt = sum(
+        1 for h in all_h
+        if h.get("current_price") is None
+        and not (isinstance(h.get("extra_data"), dict) and h["extra_data"].get("manual_ltp") is not None)
+    )
+    live_cnt = max(0, len(all_h) - manual_cnt - cost_cnt)
+    fresh_parts = [f"{live_cnt} live"]
+    if manual_cnt:
+        fresh_parts.append(f"{manual_cnt} manual/SIF")
+    if cost_cnt:
+        fresh_parts.append(f"{cost_cnt} cost-valued")
+    freshness_str = " · ".join(fresh_parts) + f" · {datetime.now().strftime('%H:%M')}"
+
+    title_text = (
+        f"{selection.owner_label}’s Portfolio"
+        if selection.owner is not None
+        else "Combined Portfolio"
+    )
+    scope_text = selection.account_label if selection.account_id is not None else "All Accounts"
     hero_html = (
-        '<div class="hero-header">'
+        '<div class="hero-header" style="padding:0.7rem 1.05rem;margin-bottom:0.75rem;">'
         '<div>'
-        '<div class="hero-title">Family Portfolio Dashboard</div>'
-        '<div class="hero-sub">Indian Equities, ETFs &amp; Mutual Funds · On-demand live market analytics</div>'
+        f'<div class="hero-title" style="font-size:1.25rem;">{html.escape(title_text)}</div>'
+        f'<div class="hero-sub">{html.escape(scope_text)} · {eq_cnt} Equities · {mf_cnt} MFs · {html.escape(freshness_str)}</div>'
         '</div>'
         '<div class="hero-badges">'
-        f'<span class="owner-pill">{html.escape(selection.owner_label)}{html.escape(scope_suffix)}</span>'
-        f'<span class="live-pill">{eq_cnt} Equities · {mf_cnt} MFs</span>'
+        f'<span class="owner-pill">{html.escape(selection.owner_label)}</span>'
         '</div>'
         '</div>'
     )

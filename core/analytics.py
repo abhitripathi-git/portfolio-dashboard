@@ -264,7 +264,9 @@ def get_portfolio_snapshot(
     mf_nav_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
 
     if unique_eq_symbols or unique_mf_keys:
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        pool = ThreadPoolExecutor(max_workers=8)
+        timed_out = False
+        try:
             eq_fut = (
                 pool.submit(fetch_latest_prices, unique_eq_symbols, db_path=db_path)
                 if unique_eq_symbols
@@ -278,12 +280,16 @@ def get_portfolio_snapshot(
                 try:
                     latest_prices = eq_fut.result(timeout=25)
                 except Exception:
+                    timed_out = True
                     warnings.append("Live equity price fetch timed out; falling back cleanly.")
             for key, fut in mf_futs.items():
                 try:
                     mf_nav_cache[key] = fut.result(timeout=20)
                 except Exception:
+                    timed_out = True
                     mf_nav_cache[key] = None
+        finally:
+            pool.shutdown(wait=not timed_out, cancel_futures=timed_out)
 
     equity_holdings: list[dict[str, Any]] = []
     equity_invested = 0.0
@@ -677,14 +683,23 @@ def compare_portfolio_vs_benchmark(
             b.get("advisory_source"),
         )
     ]
-    baseline_qty_map: dict[str, float] = {}
-    max_baseline_date: date | None = None
+    account_baselines: dict[int | None, tuple[date, dict[str, float]]] = {}
+    acct_dates: dict[int | None, date] = {}
+    acct_qtys: dict[int | None, dict[str, float]] = {}
     for b in filtered_baselines:
+        aid = int(b["account_id"]) if b.get("account_id") is not None else None
         sym = str(b["symbol"]).strip().upper()
-        baseline_qty_map[sym] = baseline_qty_map.get(sym, 0.0) + float(b.get("quantity", 0.0))
+        qmap = acct_qtys.setdefault(aid, {})
+        qmap[sym] = qmap.get(sym, 0.0) + float(b.get("quantity", 0.0))
         b_dt = _to_date(b["as_of_date"])
-        if max_baseline_date is None or b_dt > max_baseline_date:
-            max_baseline_date = b_dt
+        if aid not in acct_dates or b_dt > acct_dates[aid]:
+            acct_dates[aid] = b_dt
+    for aid, qmap in acct_qtys.items():
+        account_baselines[aid] = (acct_dates[aid], qmap)
+
+    baseline_symbols = {
+        sym for _, qmap in account_baselines.values() for sym, q in qmap.items() if q > 1e-9
+    }
 
     raw_txs = query_transactions(owner=owner, end_date=end_iso, db_path=db_path)
     eq_txs = [
@@ -710,8 +725,7 @@ def compare_portfolio_vs_benchmark(
             )
 
         included_symbols = sorted(
-            {str(tx["symbol"]).strip().upper() for tx in eq_txs}
-            | {sym for sym, q in baseline_qty_map.items() if q > 1e-9}
+            {str(tx["symbol"]).strip().upper() for tx in eq_txs} | baseline_symbols
         )
         split_since = min(earliest_tx_date, start_iso)
         splits_map = _build_split_multiplier_fn(included_symbols, split_since, adjust_for_splits, db_path)
@@ -744,6 +758,7 @@ def compare_portfolio_vs_benchmark(
             adj_price = (raw_price / factor) if factor > 0 else raw_price
             norm_txs.append(
                 {
+                    "account_id": int(tx["account_id"]) if tx.get("account_id") is not None else None,
                     "date": tx_dt,
                     "symbol": sym,
                     "side": side,
@@ -771,8 +786,7 @@ def compare_portfolio_vs_benchmark(
             included_symbols=included_symbols,
             excluded_list=excluded_list,
             warnings=warnings,
-            baseline_qty_map=baseline_qty_map if all_baselines else None,
-            baseline_date=max_baseline_date if all_baselines else None,
+            account_baselines=account_baselines if account_baselines else None,
             splits_map=splits_map if all_baselines else None,
         )
 
@@ -900,6 +914,7 @@ def _simulate_transactions_vs_benchmark(
     baseline_qty_map: dict[str, float] | None = None,
     baseline_date: date | None = None,
     splits_map: dict[str, pd.Series] | None = None,
+    account_baselines: dict[int | None, tuple[date, dict[str, float]]] | None = None,
 ) -> dict[str, Any]:
     calendar = _build_trading_calendar(price_df, bench_series, start_iso, end_iso)
     if calendar.empty:
@@ -914,11 +929,16 @@ def _simulate_transactions_vs_benchmark(
     )
 
     first_day = calendar[0].date()
-    qty_map: dict[str, float] = {s: 0.0 for s in included_symbols}
+    acct_qty_map: dict[int | None, dict[str, float]] = {}
     last_known_price: dict[str, float] = {}
 
+    if account_baselines is None and baseline_qty_map is not None and baseline_date is not None:
+        account_baselines = {None: (baseline_date, baseline_qty_map)}
+
     def apply_tx(tx: dict[str, Any]) -> float:
-        """Apply a transaction to qty_map and return net external capital inflow (+buy / -sell / -div)."""
+        """Apply a transaction to its account's qty_map and return net external capital inflow (+buy / -sell / -div)."""
+        aid = tx.get("account_id")
+        qmap = acct_qty_map.setdefault(aid, {})
         sym = tx["symbol"]
         side = tx["side"]
         adj_qty = tx["adj_qty"]
@@ -928,62 +948,67 @@ def _simulate_transactions_vs_benchmark(
             last_known_price[sym] = tx["adj_price"]
 
         if side == "BUY":
-            qty_map[sym] = qty_map.get(sym, 0.0) + adj_qty
+            qmap[sym] = qmap.get(sym, 0.0) + adj_qty
             return amt + fees
         if side == "SELL":
-            held = qty_map.get(sym, 0.0)
-            qty_map[sym] = max(0.0, held - adj_qty)
+            held = qmap.get(sym, 0.0)
+            qmap[sym] = max(0.0, held - adj_qty)
             return -(max(amt - fees, 0.0))
         if side == "DIVIDEND":
             return -amt
         if side in ("BONUS", "SPLIT"):
-            qty_map[sym] = qty_map.get(sym, 0.0) + adj_qty
+            qmap[sym] = qmap.get(sym, 0.0) + adj_qty
             return 0.0
         return 0.0
 
-    tx_idx = 0
-    if baseline_qty_map is not None and baseline_date is not None:
-        # Initialize from depository baseline (split-adjusted to baseline_date)
-        for sym, bq in baseline_qty_map.items():
-            factor = _future_split_factor((splits_map or {}).get(sym), baseline_date)
-            qty_map[sym] = float(bq) * factor
+    # Initialize each account independently using its own baseline (or pre-window replay if no baseline)
+    for aid, (b_date, b_qmap) in (account_baselines or {}).items():
+        qmap = acct_qty_map.setdefault(aid, {})
+        for sym, bq in b_qmap.items():
+            factor = _future_split_factor((splits_map or {}).get(sym), b_date)
+            qmap[sym] = float(bq) * factor
 
-        if first_day <= baseline_date:
-            # Unwind trades in [first_day, baseline_date] so qty_map reflects morning of first_day
-            for tx in norm_txs:
+    tx_idx = 0
+    for tx in norm_txs:
+        aid = tx.get("account_id")
+        if account_baselines and aid in account_baselines:
+            b_date = account_baselines[aid][0]
+            if first_day <= b_date:
                 if tx["date"] < first_day:
                     if tx["adj_price"] > 0:
                         last_known_price[tx["symbol"]] = tx["adj_price"]
-                elif tx["date"] <= baseline_date:
+                elif tx["date"] <= b_date:
+                    qmap = acct_qty_map.setdefault(aid, {})
                     sym = tx["symbol"]
                     if tx["adj_price"] > 0:
                         last_known_price[sym] = tx["adj_price"]
                     if tx["side"] in ("BUY", "BONUS", "SPLIT"):
-                        qty_map[sym] = qty_map.get(sym, 0.0) - tx["adj_qty"]
+                        qmap[sym] = qmap.get(sym, 0.0) - tx["adj_qty"]
                     elif tx["side"] == "SELL":
-                        qty_map[sym] = qty_map.get(sym, 0.0) + tx["adj_qty"]
-            for sym in list(qty_map.keys()):
-                if qty_map[sym] < 1e-6:
-                    qty_map[sym] = 0.0
-            while tx_idx < len(norm_txs) and norm_txs[tx_idx]["date"] < first_day:
-                tx_idx += 1
+                        qmap[sym] = qmap.get(sym, 0.0) + tx["adj_qty"]
+            else:
+                if b_date < tx["date"] < first_day:
+                    apply_tx(tx)
         else:
-            # Window begins after baseline_date: replay intermediate trades forward
-            while tx_idx < len(norm_txs) and norm_txs[tx_idx]["date"] < first_day:
-                if norm_txs[tx_idx]["date"] > baseline_date:
-                    apply_tx(norm_txs[tx_idx])
-                tx_idx += 1
-    else:
-        # Replay trades strictly prior to the first trading day of the window
-        while tx_idx < len(norm_txs) and norm_txs[tx_idx]["date"] < first_day:
-            apply_tx(norm_txs[tx_idx])
-            tx_idx += 1
+            if tx["date"] < first_day:
+                apply_tx(tx)
+
+    for qmap in acct_qty_map.values():
+        for sym in list(qmap.keys()):
+            if qmap[sym] < 1e-6:
+                qmap[sym] = 0.0
+
+    while tx_idx < len(norm_txs) and norm_txs[tx_idx]["date"] < first_day:
+        tx_idx += 1
 
     def mark_portfolio(ts: pd.Timestamp) -> float:
         total = 0.0
-        for sym, q in qty_map.items():
-            if q <= 1e-9:
-                continue
+        sym_totals: dict[str, float] = {}
+        for qmap in acct_qty_map.values():
+            for sym, q in qmap.items():
+                if q > 1e-9:
+                    sym_totals[sym] = sym_totals.get(sym, 0.0) + q
+        for sym, q in sym_totals.items():
             px = aligned_prices.at[ts, sym]
             if pd.notna(px) and float(px) > 0:
                 last_known_price[sym] = float(px)

@@ -1,4 +1,4 @@
-"""Holdings & Movers tab: Equity & MF tables with extra_data, gainers/losers chart, and transactions."""
+"""Holdings & Movers tab: Equity & MF tables with extra_data and gainers/losers chart."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from core.db import query_transactions
 from ui.formatters import (
     GAIN_COLOR,
     LOSS_COLOR,
@@ -302,103 +301,3 @@ def render_holdings_tab(snapshot: dict[str, Any], selection: SidebarSelection) -
 
     # 3. Movers Bar Chart
     _render_movers_chart(all_holdings)
-
-    st.divider()
-
-    # 4. Searchable / Filterable Transactions Table
-    st.subheader("Transactions Ledger")
-    txs = query_transactions(
-        owner=selection.owner,
-        account_id=selection.account_id,
-        db_path=selection.db_path,
-    )
-    if not txs:
-        st.info("No transactions recorded yet for this selection.")
-        return
-
-    fc1, fc2, fc3 = st.columns([1.4, 1.0, 1.0])
-    with fc1:
-        tx_search = st.text_input(
-            "Search Symbol / ISIN / Custom Fields",
-            placeholder="Type symbol or note...",
-            key="tx_ledger_search",
-        ).strip().lower()
-    with fc2:
-        all_sides = sorted({str(t.get("side", "")).upper() for t in txs if t.get("side")})
-        if "tx_side_filter" not in st.session_state:
-            st.session_state["tx_side_filter"] = all_sides
-        else:
-            st.session_state["tx_side_filter"] = [
-                s for s in st.session_state["tx_side_filter"] if s in all_sides
-            ] or all_sides
-        side_filter = st.multiselect(
-            "Side",
-            options=all_sides,
-            key="tx_side_filter",
-        )
-    with fc3:
-        min_dt = min(str(t["trade_date"]) for t in txs)
-        max_dt = max(str(t["trade_date"]) for t in txs)
-        sort_desc = st.checkbox("Newest first", value=True, key="tx_sort_desc")
-        st.caption(f"Date span: {min_dt} → {max_dt}")
-
-    tx_df, tx_extra_cols = expand_extra_data_columns(
-        txs,
-        reserved_keys={
-            "trade_date", "owner", "account_name", "symbol", "isin",
-            "exchange", "asset_type", "side", "quantity", "price",
-            "amount", "fees", "source", "advisory_source", "advisory_notes",
-        },
-    )
-    if side_filter:
-        tx_df = tx_df[tx_df["side"].isin(side_filter)]
-    if tx_search:
-        mask = tx_df.astype(str).apply(lambda col: col.str.lower().str.contains(tx_search, na=False)).any(axis=1)
-        tx_df = tx_df[mask]
-    if sort_desc and "trade_date" in tx_df.columns:
-        tx_df = tx_df.sort_values(by=["trade_date", "id"], ascending=[False, False])
-
-    tx_show_all = st.toggle(
-        "Show detailed columns (Account, ISIN, Fees, Source, Notes)",
-        value=False,
-        key="tx_show_details",
-    )
-    compact_tx_cols = ["trade_date"] + (["owner"] if selection.owner is None else []) + [
-        "symbol", "side", "quantity", "price", "amount",
-    ]
-    detailed_tx_cols = [
-        "trade_date", "owner", "account_name", "symbol", "isin", "exchange",
-        "side", "quantity", "price", "amount", "fees", "source",
-        "advisory_source", "advisory_notes", *tx_extra_cols,
-    ]
-    target_tx_cols = detailed_tx_cols if tx_show_all else compact_tx_cols
-    show_tx_cols = [c for c in target_tx_cols if c in tx_df.columns]
-    st.caption(f"Showing {len(tx_df)} of {len(txs)} transactions")
-    st.dataframe(
-        tx_df[show_tx_cols],
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "trade_date": "Date",
-            "owner": "Owner",
-            "account_name": "Account",
-            "symbol": "Symbol",
-            "isin": "ISIN",
-            "exchange": "Exch",
-            "side": "Side",
-            "quantity": st.column_config.NumberColumn("Qty", format="%.4f"),
-            "price": st.column_config.NumberColumn("Price (₹)", format="₹%.2f"),
-            "amount": st.column_config.NumberColumn("Amount (₹)", format="₹%,.2f"),
-            "fees": st.column_config.NumberColumn("Fees (₹)", format="₹%.2f"),
-            "source": "Source",
-            "advisory_source": "Advisory",
-            "advisory_notes": "Advisory Notes",
-        },
-    )
-    st.download_button(
-        "Download Filtered Transactions CSV",
-        data=tx_df[show_tx_cols].to_csv(index=False).encode("utf-8"),
-        file_name=f"transactions_{selection.owner_label.lower()}.csv",
-        mime="text/csv",
-        key="dl_tx_csv",
-    )

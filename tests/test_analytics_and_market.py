@@ -735,3 +735,71 @@ def test_gemini_stream_midstream_error_and_context_failure(tmp_path: Path, monke
             streamed.append(chunk)
     assert streamed == ["partial-"]
     assert len(mid_models.calls) == 1
+
+
+def test_per_account_baseline_replay_and_cas_tx_persistence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify per-account baseline replay isolates accounts and import_cams_cas persists MF transactions with dedup."""
+    import pandas as pd
+    import core.analytics as analytics
+    from core.db import get_or_create_account, init_db, insert_transactions, query_transactions, upsert_holding_baselines
+    from ingestion.cams_cas import import_cams_cas
+
+    db_path = tmp_path / "per_acct.db"
+    init_db(db_path, seed_default_owners=False)
+
+    acc1 = get_or_create_account("Abhishek", broker="5paisa", account_name="A1", db_path=db_path)
+    acc2 = get_or_create_account("Tanu", broker="5paisa", account_name="A2", db_path=db_path)
+
+    # Account 1 has a baseline on 2026-01-05 (10 shares of ALPHA, including pre-existing 10 before window)
+    upsert_holding_baselines(
+        acc1["id"],
+        [{"symbol": "ALPHA", "quantity": 10.0, "avg_price": 100.0, "as_of_date": "2026-01-05"}],
+        db_path=db_path,
+    )
+    # Account 2 has NO baseline, and bought 5 shares of ALPHA on 2026-01-02 + 5 shares on 2026-01-04
+    insert_transactions(
+        acc2["id"],
+        [
+            {"trade_date": "2026-01-02", "symbol": "ALPHA", "side": "BUY", "quantity": 5.0, "price": 100.0, "amount": 500.0},
+            {"trade_date": "2026-01-04", "symbol": "ALPHA", "side": "BUY", "quantity": 5.0, "price": 100.0, "amount": 500.0},
+        ],
+        db_path=db_path,
+    )
+
+    dates = pd.date_range("2026-01-01", "2026-01-06", freq="D")
+    monkeypatch.setattr(analytics, "fetch_historical_prices", lambda *_a, **_kw: pd.DataFrame({"ALPHA": [100.0] * len(dates)}, index=dates))
+    monkeypatch.setattr(analytics, "fetch_benchmark_series", lambda *_a, **_kw: pd.Series([100.0] * len(dates), index=dates))
+    monkeypatch.setattr(analytics, "_build_split_multiplier_fn", lambda *_a, **_kw: {})
+
+    res = analytics.compare_portfolio_vs_benchmark(
+        owner=None,
+        start_date="2026-01-03",
+        end_date="2026-01-06",
+        adjust_for_splits=False,
+        db_path=db_path,
+    )
+    # On 2026-01-03: Acc1 has 10 shares (from baseline), Acc2 has 5 shares (from 2026-01-02 BUY) => 1500
+    # On 2026-01-04..06: Acc2 adds 5 shares => 2000 ending value
+    assert res["summary"]["portfolio_start_value"] == pytest.approx(1500.0)
+    assert res["summary"]["portfolio_end_value"] == pytest.approx(2000.0)
+
+    # Verify import_cams_cas persists parsed mf_transactions with dedup on repeat import
+    import ingestion.cams_cas as cas_mod
+    monkeypatch.setattr(
+        cas_mod,
+        "parse_cams_cas",
+        lambda *_a, **_kw: {
+            "mf_holdings": [{"scheme_name": "Test MF", "folio_number": "F1", "amfi_code": "123456", "units": 10.0, "avg_nav": 100.0, "invested_value": 1000.0}],
+            "mf_transactions": [{"trade_date": "2026-01-10", "symbol": "123456", "isin": "INF0001", "asset_type": "MF", "side": "BUY", "quantity": 10.0, "price": 100.0, "amount": 1000.0}],
+            "investor_info": {},
+            "statement_period": {},
+            "warnings": [],
+        },
+    )
+    r1 = import_cams_cas(b"dummy", "cas.csv", owner="Abhishek", db_path=db_path)
+    assert r1["transactions_inserted"] == 1
+    assert r1["transactions_skipped"] == 0
+    r2 = import_cams_cas(b"dummy", "cas.csv", owner="Abhishek", db_path=db_path)
+    assert r2["transactions_inserted"] == 0
+    assert r2["transactions_skipped"] == 1
+    assert len(query_transactions(owner="Abhishek", db_path=db_path)) == 1

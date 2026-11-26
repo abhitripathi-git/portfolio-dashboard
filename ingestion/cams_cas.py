@@ -11,7 +11,7 @@ from typing import Any
 import casparser
 import pdfplumber
 
-from core.db import get_or_create_account, init_db, upsert_mf_holdings
+from core.db import get_or_create_account, init_db, insert_transactions, upsert_mf_holdings
 from ingestion._utils import (
     FileInput,
     build_extra_data,
@@ -623,10 +623,26 @@ def import_cams_cas(
         db_path=db_path,
     )
 
+    tx_res = {"inserted": 0, "skipped": 0}
+    if parsed["mf_transactions"]:
+        mf_txs = [
+            {"exchange": "AMFI", **tx}
+            for tx in parsed["mf_transactions"]
+        ]
+        tx_res = insert_transactions(
+            account_id=account["id"],
+            transactions=mf_txs,
+            source="cams_cas",
+            filename=filename,
+            db_path=db_path,
+        )
+
     return {
         "account": account,
         "mf_holdings_count": len(parsed["mf_holdings"]),
         "mf_transactions_count": len(parsed["mf_transactions"]),
+        "transactions_inserted": tx_res["inserted"],
+        "transactions_skipped": tx_res["skipped"],
         "investor_info": parsed["investor_info"],
         "statement_period": parsed["statement_period"],
         "warnings": parsed["warnings"],
