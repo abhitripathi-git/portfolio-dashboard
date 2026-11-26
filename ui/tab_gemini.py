@@ -17,37 +17,61 @@ from core.gemini_chat import (
 from ui.sidebar import SidebarSelection
 
 
-def _render_mic_button() -> None:
-    """Render a zero-cost browser Web Speech API mic button that streams text into the Ask box."""
-    mic_html = """
-<style>html,body{margin:0;padding:0;overflow:hidden;background:transparent;}</style>
-<div style="display:flex;align-items:center;font-family:Inter,-apple-system,sans-serif;">
-  <button id="micBtn" type="button" style="
-    display:inline-flex;align-items:center;justify-content:center;gap:6px;box-sizing:border-box;
-    width:100%;height:38px;padding:0 14px;border-radius:10px;cursor:pointer;
-    border:1px solid rgba(148,163,184,0.32);background:rgba(148,163,184,0.09);
-    color:inherit;font-size:13.5px;font-weight:550;transition:all .15s ease;">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+def _render_mic_and_send_controls() -> None:
+    """Render Antigravity-style compact Mic + Arrow Send buttons with 1-click auto-stop & flush."""
+    controls_html = """
+<style>
+  html,body{margin:0;padding:0;overflow:hidden;background:transparent;}
+  .bar{display:flex;align-items:center;justify-content:flex-end;gap:8px;height:40px;font-family:Inter,-apple-system,sans-serif;}
+  .mic-btn{
+    display:inline-flex;align-items:center;justify-content:center;gap:5px;box-sizing:border-box;
+    height:34px;padding:0 11px;border-radius:999px;cursor:pointer;
+    border:1px solid rgba(148,163,184,0.35);background:rgba(148,163,184,0.12);
+    color:#94A3B8;font-size:12.5px;font-weight:550;transition:all .15s ease;
+  }
+  .mic-btn:hover{background:rgba(148,163,184,0.20);}
+  .mic-btn.listening{
+    background:rgba(194,65,75,0.16);border-color:#C2414B;color:#FCA5A5;
+  }
+  .send-btn{
+    display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;
+    width:34px;height:34px;border-radius:999px;cursor:pointer;
+    border:none;background:#3B82F6;color:#FFFFFF;transition:all .15s ease;
+  }
+  .send-btn:hover{background:#2563EB;transform:translateY(-1px);}
+  .send-btn:active{transform:translateY(0);}
+</style>
+<div class="bar">
+  <button id="micBtn" class="mic-btn" type="button" title="Dictate (click again to stop, or just click Send)">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
       <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
       <line x1="12" x2="12" y1="19" y2="22"/>
     </svg>
     <span id="micLabel">Speak</span>
   </button>
+  <button id="sendBtn" class="send-btn" type="button" title="Ask Gemini" aria-label="Ask Gemini">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 19V5"/>
+      <path d="m5 12 7-7 7 7"/>
+    </svg>
+  </button>
 </div>
 <script>
 (function() {
-  const btn = document.getElementById('micBtn');
-  const lbl = document.getElementById('micLabel');
+  const micBtn = document.getElementById('micBtn');
+  const micLbl = document.getElementById('micLabel');
+  const sendBtn = document.getElementById('sendBtn');
+  try {
+    const parentColor = window.parent && window.parent.getComputedStyle(window.parent.document.body).color;
+    if (parentColor) micBtn.style.color = parentColor;
+  } catch (e) {}
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition || (window.parent && (window.parent.SpeechRecognition || window.parent.webkitSpeechRecognition));
-  if (!SR) {
-    lbl.textContent = 'Mac: Fn×2';
-    btn.title = 'Browser Speech API unavailable here — press Fn twice on Mac to dictate.';
-    return;
-  }
+
   let rec = null;
   let listening = false;
   let baseText = '';
+  let latestTranscript = '';
 
   function findTextarea() {
     try {
@@ -58,67 +82,92 @@ def _render_mic_button() -> None:
     }
   }
 
-  function setNativeValue(el, val) {
+  function findHiddenSendButton() {
+    try {
+      const doc = window.parent.document;
+      return doc.querySelector('.st-key-gemini_send_btn button') || doc.querySelector('button[aria-label="gemini_send_trigger"]');
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function syncTextarea(el, val, doBlur) {
+    if (!el) return;
     const proto = window.parent ? window.parent.HTMLTextAreaElement.prototype : HTMLTextAreaElement.prototype;
     const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
     setter.call(el, val);
     el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    if (doBlur) el.blur();
   }
 
-  btn.addEventListener('click', function() {
+  function resetMicUI() {
+    listening = false;
+    micLbl.textContent = SR ? 'Speak' : 'Mac: Fn×2';
+    micBtn.classList.remove('listening');
+  }
+
+  if (!SR) {
+    micLbl.textContent = 'Mac: Fn×2';
+    micBtn.title = 'Browser Speech API unavailable here — press Fn twice on Mac to dictate.';
+  } else {
+    micBtn.addEventListener('click', function() {
+      if (listening && rec) {
+        rec.stop();
+        return;
+      }
+      const ta = findTextarea();
+      baseText = ta ? ta.value.trim() : '';
+      latestTranscript = '';
+      rec = new SR();
+      rec.lang = 'en-IN';
+      rec.continuous = true;
+      rec.interimResults = true;
+
+      rec.onstart = function() {
+        listening = true;
+        micLbl.textContent = 'Listening';
+        micBtn.classList.add('listening');
+      };
+
+      rec.onresult = function(ev) {
+        let transcript = '';
+        for (let i = 0; i < ev.results.length; i++) {
+          transcript += ev.results[i][0].transcript;
+        }
+        latestTranscript = transcript.trim();
+        const target = findTextarea();
+        if (target) {
+          const joined = baseText ? (baseText + ' ' + latestTranscript) : latestTranscript;
+          syncTextarea(target, joined, false);
+        }
+      };
+
+      rec.onerror = resetMicUI;
+      rec.onend = resetMicUI;
+      rec.start();
+    });
+  }
+
+  sendBtn.addEventListener('click', function() {
     if (listening && rec) {
-      rec.stop();
-      return;
+      try { rec.stop(); } catch (e) {}
+      resetMicUI();
     }
     const ta = findTextarea();
-    baseText = ta ? ta.value.trim() : '';
-    rec = new SR();
-    rec.lang = 'en-IN';
-    rec.continuous = true;
-    rec.interimResults = true;
-
-    rec.onstart = function() {
-      listening = true;
-      lbl.textContent = 'Listening... (Stop)';
-      btn.style.background = 'rgba(194, 65, 75, 0.14)';
-      btn.style.borderColor = '#C2414B';
-      btn.style.color = '#C2414B';
-    };
-
-    rec.onresult = function(ev) {
-      let transcript = '';
-      for (let i = 0; i < ev.results.length; i++) {
-        transcript += ev.results[i][0].transcript;
-      }
-      const target = findTextarea();
-      if (target) {
-        const joined = baseText ? (baseText + ' ' + transcript.trim()) : transcript.trim();
-        setNativeValue(target, joined);
-      }
-    };
-
-    rec.onerror = function() {
-      listening = false;
-      lbl.textContent = 'Speak';
-      btn.style.background = 'rgba(148,163,184,0.10)';
-      btn.style.borderColor = 'rgba(148,163,184,0.35)';
-      btn.style.color = 'inherit';
-    };
-
-    rec.onend = function() {
-      listening = false;
-      lbl.textContent = 'Speak';
-      btn.style.background = 'rgba(148,163,184,0.10)';
-      btn.style.borderColor = 'rgba(148,163,184,0.35)';
-      btn.style.color = 'inherit';
-    };
-
-    rec.start();
+    if (ta) {
+      const currentVal = ta.value;
+      syncTextarea(ta, currentVal, true);
+    }
+    setTimeout(function() {
+      const realBtn = findHiddenSendButton();
+      if (realBtn) realBtn.click();
+    }, 75);
   });
 })();
 </script>
 """
-    components.html(mic_html, height=40)
+    components.html(controls_html, height=42)
 
 
 def render_gemini_tab(
@@ -153,11 +202,6 @@ def render_gemini_tab(
         "Settings & Configuration" + (" (Configured)" if current_key else " (API Key Required)"),
         expanded=not bool(current_key),
     ):
-        model_choice = st.selectbox(
-            "Gemini Model",
-            options=AVAILABLE_GEMINI_MODELS,
-            key="gemini_model_choice",
-        )
         enable_live_tools = st.toggle(
             "Enable live benchmark backtest tools (slower multi-turn)",
             value=False,
@@ -199,7 +243,6 @@ def render_gemini_tab(
     _render_gemini_chat_fragment(
         selection=selection,
         snapshot=snapshot,
-        model_choice=model_choice,
         enable_live_tools=enable_live_tools,
     )
 
@@ -208,7 +251,6 @@ def render_gemini_tab(
 def _render_gemini_chat_fragment(
     selection: SidebarSelection,
     snapshot: dict[str, Any] | None,
-    model_choice: str,
     enable_live_tools: bool,
 ) -> None:
     """Render conversation history and composer without triggering a full-app rerun on send."""
@@ -225,10 +267,10 @@ def _render_gemini_chat_fragment(
                     for item in tools_used:
                         st.code(f"{item['tool']}({item['args']})", language="python")
 
-    # Large, comfortable composer box + free live Mic button
+    # Large, comfortable composer box + Antigravity-style inline footer (model selector + mic + arrow send)
     draft = st.text_area(
         "Ask Gemini",
-        height=150,
+        height=140,
         key="gemini_draft_prompt",
         label_visibility="collapsed",
         placeholder=(
@@ -238,17 +280,25 @@ def _render_gemini_chat_fragment(
             "• How much is our India vs Foreign allocation?"
         ),
     )
-    act_mic, act_spacer, act_send = st.columns([1.2, 2.8, 1.4], vertical_alignment="center")
-    with act_mic:
-        _render_mic_button()
-    with act_send:
-        send_clicked = st.button(
-            "Ask Gemini",
-            icon=":material/send:",
-            type="primary",
-            width="stretch",
-            key="gemini_send_btn",
+    act_model, act_spacer, act_ctrl = st.columns([1.8, 2.0, 1.4], vertical_alignment="center")
+    with act_model:
+        model_choice = st.selectbox(
+            "Model",
+            options=AVAILABLE_GEMINI_MODELS,
+            key="gemini_model_choice",
+            label_visibility="collapsed",
         )
+    with act_ctrl:
+        _render_mic_and_send_controls()
+
+    st.markdown(
+        "<style>.st-key-gemini_send_btn{position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;overflow:hidden;opacity:0;}</style>",
+        unsafe_allow_html=True,
+    )
+    send_clicked = st.button(
+        "Send",
+        key="gemini_send_btn",
+    )
 
     user_prompt = draft.strip() if send_clicked and draft.strip() else ""
     if user_prompt:
